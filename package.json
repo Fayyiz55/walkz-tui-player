@@ -1,0 +1,27 @@
+{
+  "name": "walkz-tui-player",
+  "version": "0.3.1",
+  "description": "Walkz TUI Player — aesthetic terminal music player with album art, synced lyrics, playlists and a tag editor",
+  "main": "src/index.js",
+  "bin": {
+    "walkz-tui": "./walkz-tui"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "jam-server": "node src/jam/jam_server.js"
+  },
+  "keywords": [
+    "walkz",
+    "tui",
+    "music-player",
+    "terminal",
+    "rust",
+    "ratatui",
+    "listen-together"
+  ],
+  "author": "Fayyiz55",
+  "license": "GPL-3.0",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

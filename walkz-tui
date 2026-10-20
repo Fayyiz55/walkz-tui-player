@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Walkz TUI Player launcher — works in-repo (./walkz-tui) and via symlink
+# (e.g. ~/.local/bin/walkz-tui): resolves the symlink chain back to the repo.
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+exec "$SCRIPT_DIR/target/release/walkz-tui" "$@"

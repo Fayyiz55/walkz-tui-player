@@ -1,0 +1,11 @@
+pub mod app;
+pub mod audio;
+pub mod cover;
+pub mod library;
+pub mod lyrics;
+pub mod media_probe;
+pub mod models;
+pub mod playlist;
+pub mod scanner;
+pub mod tag_editor;
+pub mod ui;
