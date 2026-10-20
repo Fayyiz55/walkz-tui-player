@@ -4,12 +4,24 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, Paragraph};
 use ratatui::Frame;
 use crate::app::App;
+use crate::models::Focus;
 
 pub fn render_queue(f: &mut Frame, app: &App, area: Rect) {
+    // The queue list owns focus in its ring (QueueList <-> TabBar); dim it
+    // when focus sits on the tab bar.
+    let list_focused = app.focus == Focus::QueueList;
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_type(if list_focused {
+            BorderType::Double
+        } else {
+            BorderType::Rounded
+        })
+        .border_style(Style::default().fg(if list_focused {
+            Color::Cyan
+        } else {
+            Color::DarkGray
+        }))
         .title(" 📋 Playback Queue & History ");
 
     let inner = block.inner(area);

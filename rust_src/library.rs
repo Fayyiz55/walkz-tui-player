@@ -444,7 +444,8 @@ impl Library {
     }
 
     /// Get list of category names and track count for a given CategoryType
-    pub fn get_category_items(&self, cat: CategoryType) -> Vec<(String, usize)> {        match cat {
+    pub fn get_category_items(&self, cat: CategoryType) -> Vec<(String, usize)> {
+        match cat {
             CategoryType::Artist => self
                 .artists
                 .iter()
@@ -465,6 +466,12 @@ impl Library {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.len()))
                 .collect(),
+            // Every track title, in library order — the "flat songs" listing.
+            CategoryType::Song => self
+                .tracks
+                .iter()
+                .map(|t| (t.title.clone(), 1))
+                .collect(),
         }
     }
 
@@ -475,6 +482,14 @@ impl Library {
             CategoryType::Playlist => self.playlists.get(name).cloned().unwrap_or_default(),
             CategoryType::Album => self.albums.get(name).cloned().unwrap_or_default(),
             CategoryType::AlbumArtist => self.album_artists.get(name).cloned().unwrap_or_default(),
+            // Song titles can repeat across albums; all matching tracks join.
+            CategoryType::Song => self
+                .tracks
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| t.title == name)
+                .map(|(idx, _)| idx)
+                .collect(),
         }
     }
 }

@@ -7,5 +7,6 @@ pub mod media_probe;
 pub mod models;
 pub mod playlist;
 pub mod scanner;
+pub mod settings;
 pub mod tag_editor;
 pub mod ui;

@@ -7,6 +7,7 @@ mod media_probe;
 mod models;
 mod playlist;
 mod scanner;
+mod settings;
 mod tag_editor;
 mod ui;
 

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use crate::audio::AudioPlayer;
 use crate::library::Library;
-use crate::models::{AppTab, CategoryType, QuadrantFocus};
+use crate::models::{AppTab, CategoryType, Focus};
 use crate::playlist::UserData;
 use crate::scanner::{ScanJob, ScanPayload};
 use crate::tag_editor::TagEditorState;
@@ -120,7 +120,7 @@ pub struct App {
     pub library: Library,
     pub audio: AudioPlayer,
     pub active_tab: AppTab,
-    pub quadrant_focus: QuadrantFocus,
+    pub focus: Focus,
     pub category_type: CategoryType,
     pub selected_category_idx: usize,
     pub selected_tracklist_idx: usize,
@@ -149,6 +149,12 @@ pub struct App {
     /// the tags invalidate it. Keeps resident memory at one artwork instead
     /// of one artwork per library track.
     art_cache: std::cell::RefCell<Option<ArtCacheEntry>>,
+    /// Persisted user settings (Settings tab).
+    pub settings: crate::settings::Settings,
+    /// Selected row within the Settings list.
+    pub settings_selected: usize,
+    /// When set, the next plain keystroke rebinds this hotkey (Settings tab).
+    pub rebinding: Option<crate::settings::HotkeyAction>,
 }
 
 /// One lazily loaded artwork payload.
@@ -171,11 +177,19 @@ impl App {
             .or_else(Self::load_last_folder)
             .unwrap_or_else(Self::fallback_music_dir);
 
+        // User settings decide whether the library cache is used at all.
+        let settings = crate::settings::Settings::load_from(&config_dir);
+
         // Launch from the persisted library cache when the target folder is
-        // unchanged: the library is ready immediately, no rescan on startup.
-        // A changed/missing folder (or missing/corrupt cache) falls back to
-        // the non-blocking startup scan.
-        let cached = Self::load_library_cache(&config_dir, &target_dir);
+        // unchanged and the user allows it: the library is ready immediately,
+        // no rescan on startup. A changed/missing folder (or missing/corrupt
+        // cache, or cache loading disabled in Settings) falls back to the
+        // non-blocking startup scan.
+        let cached = if settings.load_library_cache_on_launch {
+            Self::load_library_cache(&config_dir, &target_dir)
+        } else {
+            None
+        };
         let scan_state = if cached.is_some() {
             None
         } else {
@@ -184,13 +198,14 @@ impl App {
 
         let audio = AudioPlayer::new();
         let user_data = Self::load_user_data(&config_dir);
+        let rescan_key = settings.hotkey_char(crate::settings::HotkeyAction::Rescan);
 
         let mut app = Self {
             library,
             audio,
             active_tab: AppTab::NowPlaying,
-            quadrant_focus: QuadrantFocus::Tracklist,
-            category_type: CategoryType::Album,
+            focus: Focus::default_for_tab(AppTab::NowPlaying),
+            category_type: CategoryType::AlbumArtist,
             selected_category_idx: 0,
             selected_tracklist_idx: 0,
             active_category_name: String::from("Loading…"),
@@ -210,13 +225,27 @@ impl App {
             picker: None,
             cover_cache: std::cell::RefCell::new(None),
             art_cache: std::cell::RefCell::new(None),
+            settings,
+            settings_selected: 0,
+            rebinding: None,
         };
+
+        // Apply user defaults: launch volume and remembered playback state.
+        app.audio.volume = app.settings.default_volume.min(100) as u32;
+        if app.settings.remember_repeat_shuffle {
+            if let Some(repeat) = app.settings.saved_repeat {
+                app.audio.repeat_mode = repeat;
+            }
+            if let Some(shuffle) = app.settings.saved_shuffle {
+                app.audio.shuffle = shuffle;
+            }
+        }
 
         if let Some((payload, track_count)) = cached {
             app.apply_scan_results_at(target_dir, payload);
             app.set_notification(format!(
-                "📚 Library ready: {} tracks (from last scan) — [S] rescans",
-                track_count
+                "📚 Library ready: {} tracks (from last scan) — [{}] rescans",
+                track_count, rescan_key
             ));
         }
 
@@ -301,6 +330,64 @@ impl App {
 
     pub fn prev_category_type(&mut self) {
         self.set_category_type(self.category_type.prev());
+    }
+
+    /// Jump to a main tab via its number key (1-6) and reset focus to that
+    /// tab's default area.
+    pub fn switch_main_tab(&mut self, c: char) {
+        let tab = match c {
+            '1' => AppTab::NowPlaying,
+            '2' => AppTab::Categories,
+            '3' => AppTab::Queue,
+            '4' => AppTab::MetadataEditor,
+            '5' => AppTab::AudioOutput,
+            _ => AppTab::Settings,
+        };
+        self.active_tab = tab;
+        self.focus = Focus::default_for_tab(tab);
+    }
+
+    /// Execute a global action through its (possibly rebound) hotkey.
+    pub fn perform_hotkey_action(&mut self, action: crate::settings::HotkeyAction) {
+        use crate::settings::HotkeyAction as H;
+        match action {
+            H::NextTrack => self.play_next(),
+            H::PrevTrack => self.play_prev(),
+            H::PlayPause => self.audio.toggle_pause(),
+            H::VolumeUp => self.change_volume_setting(5),
+            H::VolumeDown => self.change_volume_setting(-5),
+            H::ToggleShuffle => {
+                self.audio.shuffle = !self.audio.shuffle;
+                self.set_notification(format!(
+                    "🔀 Shuffle: {}",
+                    if self.audio.shuffle { "On" } else { "Off" }
+                ));
+                self.remember_playback_state();
+            }
+            H::CycleRepeat => {
+                self.audio.repeat_mode = self.audio.repeat_mode.next();
+                self.set_notification(format!("🔁 Repeat: {}", self.audio.repeat_mode.label()));
+                self.remember_playback_state();
+            }
+            H::SongMenu => self.open_song_menu(),
+            H::OpenFolder => self.open_folder_dialog(),
+            H::Rescan => self.manual_rescan(),
+        }
+    }
+
+    fn change_volume_setting(&mut self, delta: i32) {
+        self.audio.change_volume(delta);
+        self.set_notification(format!("🔊 Volume: {}%", self.audio.volume));
+    }
+
+    /// Snapshot repeat/shuffle into the settings file while remembering is
+    /// enabled in Settings.
+    fn remember_playback_state(&mut self) {
+        if self.settings.remember_repeat_shuffle {
+            self.settings.saved_repeat = Some(self.audio.repeat_mode);
+            self.settings.saved_shuffle = Some(self.audio.shuffle);
+            self.save_settings();
+        }
     }
 
     /// Update tracks in the tracklist according to current category selection
@@ -1013,6 +1100,26 @@ impl App {
     pub fn handle_key(&mut self, code: crossterm::event::KeyCode, modifiers: crossterm::event::KeyModifiers) {
         use crossterm::event::KeyCode;
 
+        // 0. Hotkey rebind capture (Settings tab): the next plain key becomes
+        // the binding. Esc (or any non-plain key) cancels the capture.
+        if let Some(action) = self.rebinding {
+            self.rebinding = None;
+            match (code, modifiers) {
+                (KeyCode::Esc, _) => {
+                    self.set_notification("⌨ Rebind cancelled".to_string());
+                }
+                (KeyCode::Char(c), m) if m.is_empty() => {
+                    self.settings.set_hotkey(action, c);
+                    self.save_settings();
+                    self.set_notification(format!("⌨ {} → [{}]", action.label(), c));
+                }
+                _ => {
+                    self.set_notification("⌨ Rebind cancelled".to_string());
+                }
+            }
+            return;
+        }
+
         // 1. Folder dialog captures all keys
         if self.is_folder_dialog_open {
             match code {
@@ -1166,20 +1273,10 @@ impl App {
                     self.active_tab = AppTab::NowPlaying;
                     return;
                 }
-                KeyCode::Char('1') if modifiers.is_empty() => {
-                    self.active_tab = AppTab::NowPlaying;
-                    return;
-                }
-                KeyCode::Char('2') if modifiers.is_empty() => {
-                    self.active_tab = AppTab::Categories;
-                    return;
-                }
-                KeyCode::Char('3') if modifiers.is_empty() => {
-                    self.active_tab = AppTab::Queue;
-                    return;
-                }
-                KeyCode::Char('5') if modifiers.is_empty() => {
-                    self.active_tab = AppTab::AudioOutput;
+                KeyCode::Char(c @ ('1' | '2' | '3' | '5' | '6')) if modifiers.is_empty() => {
+                    // Keep the editor's tab-jump shortcuts; note '4' still
+                    // types into fields (the main tab bar covers 4 elsewhere).
+                    self.switch_main_tab(c);
                     return;
                 }
                 KeyCode::Char(c) => {
@@ -1191,7 +1288,8 @@ impl App {
             return;
         }
 
-        // 6. Global hotkeys
+        // 6. Global hotkeys. Rebindable actions go through the settings
+        // hotkey map; fixed keys (quit, seek, Tab focus, tab digits) follow.
         match code {
             KeyCode::Char('q') | KeyCode::Char('Q') => {
                 self.should_quit = true;
@@ -1201,129 +1299,315 @@ impl App {
                 self.should_quit = true;
                 return;
             }
-            KeyCode::Char('o') | KeyCode::Char('O') | KeyCode::Char('f') | KeyCode::Char('F') => {
-                self.open_folder_dialog();
-                return;
-            }
-            KeyCode::Char('S') => {
-                self.manual_rescan();
-                return;
-            }
-            KeyCode::Char('a') => {
-                self.open_song_menu();
-                return;
-            }
-            KeyCode::Char(c @ ('1' | '2' | '3' | '4' | '5')) => {
-                // Inside the Categories tab, 1–4 switch the category type
-                // (matching the panel hint); 5 always jumps to Audio Output.
-                if self.active_tab == AppTab::Categories {
-                    match c {
-                        '1' => self.set_category_type(CategoryType::Artist),
-                        '2' => self.set_category_type(CategoryType::Playlist),
-                        '3' => self.set_category_type(CategoryType::Album),
-                        '4' => self.set_category_type(CategoryType::AlbumArtist),
-                        _ => self.active_tab = AppTab::AudioOutput,
-                    }
-                } else {
-                    self.active_tab = match c {
-                        '1' => AppTab::NowPlaying,
-                        '2' => AppTab::Categories,
-                        '3' => AppTab::Queue,
-                        '4' => AppTab::MetadataEditor,
-                        _ => AppTab::AudioOutput,
-                    };
+            KeyCode::Tab => {
+                self.focus = self.focus.next_in_tab(self.active_tab);
+                // Skip the lyrics pane in the ring while it is hidden.
+                if self.active_tab == AppTab::NowPlaying
+                    && self.focus == Focus::NowLyrics
+                    && !self.settings.show_lyrics_pane
+                {
+                    self.focus = self.focus.next_in_tab(self.active_tab);
                 }
                 return;
             }
-            KeyCode::Char(' ') => {
-                self.audio.toggle_pause();
+            KeyCode::BackTab => {
+                self.focus = self.focus.prev_in_tab(self.active_tab);
+                if self.active_tab == AppTab::NowPlaying
+                    && self.focus == Focus::NowLyrics
+                    && !self.settings.show_lyrics_pane
+                {
+                    self.focus = self.focus.prev_in_tab(self.active_tab);
+                }
                 return;
             }
-            KeyCode::Char('n') => {
-                self.play_next();
+            KeyCode::Char(c @ ('1' | '2' | '3' | '4' | '5' | '6'))
+                if (modifiers - crossterm::event::KeyModifiers::SHIFT).is_empty() =>
+            {
+                // Digits act on whatever owns focus. On Categories the tab
+                // bar digits switch main tabs, the sub-tab digits switch the
+                // category type, and the panes ignore digits. Everywhere else
+                // digits switch main tabs directly.
+                if self.active_tab == AppTab::Categories {
+                    match self.focus {
+                        Focus::TabBar => self.switch_main_tab(c),
+                        Focus::CategoryTabs => {
+                            let target = match c {
+                                '1' => Some(CategoryType::AlbumArtist),
+                                '2' => Some(CategoryType::Song),
+                                '3' => Some(CategoryType::Artist),
+                                '4' => Some(CategoryType::Album),
+                                '5' => Some(CategoryType::Playlist),
+                                _ => None,
+                            };
+                            if let Some(cat) = target {
+                                self.set_category_type(cat);
+                            }
+                        }
+                        _ => {}
+                    }
+                } else {
+                    self.switch_main_tab(c);
+                }
                 return;
             }
-            KeyCode::Char('p') => {
-                self.play_prev();
-                return;
-            }
-            KeyCode::Char('+') | KeyCode::Char('=') => {
-                self.audio.change_volume(5);
-                self.set_notification(format!("🔊 Volume: {}%", self.audio.volume));
-                return;
-            }
-            KeyCode::Char('-') | KeyCode::Char('_') => {
-                self.audio.change_volume(-5);
-                self.set_notification(format!("🔊 Volume: {}%", self.audio.volume));
-                return;
-            }
-            KeyCode::Left => {
+            // Seek is global, except while the Settings list owns the
+            // arrows (Left/Right adjust the selected row there).
+            KeyCode::Left if !self.settings_owns_arrows() => {
                 self.audio.seek_relative(-5.0);
                 return;
             }
-            KeyCode::Right => {
+            KeyCode::Right if !self.settings_owns_arrows() => {
                 self.audio.seek_relative(5.0);
                 return;
             }
-            KeyCode::Char('r') => {
-                self.audio.repeat_mode = self.audio.repeat_mode.next();
-                self.set_notification(format!("🔁 Repeat: {}", self.audio.repeat_mode.label()));
-                return;
-            }
-            KeyCode::Char('s') => {
-                self.audio.shuffle = !self.audio.shuffle;
-                self.set_notification(format!("🔀 Shuffle: {}", if self.audio.shuffle { "On" } else { "Off" }));
-                return;
-            }
-            KeyCode::Tab => {
-                self.quadrant_focus = self.quadrant_focus.next();
-                return;
-            }
-            KeyCode::BackTab => {
-                self.quadrant_focus = self.quadrant_focus.prev();
-                return;
-            }
+            // Rebindable actions (exact char match, case sensitive; SHIFT is
+            // part of the char itself, e.g. `S`).
+            KeyCode::Char(c)
+                if (modifiers - crossterm::event::KeyModifiers::SHIFT).is_empty() =>
+            match self.settings.action_for_char(c) {
+                Some(action) => {
+                    self.perform_hotkey_action(action);
+                    return;
+                }
+                // Permanent aliases: '=' / '_' are the unshifted forms of the
+                // '+' / '-' volume keys.
+                None if c == '=' => {
+                    self.change_volume_setting(5);
+                    return;
+                }
+                None if c == '_' => {
+                    self.change_volume_setting(-5);
+                    return;
+                }
+                None => {}
+            },
             _ => {}
         }
 
-        // 7. Tab-specific navigation
+        // 7. Tab-specific navigation (focus-aware: keys land in the focused
+        // pane; a dim/unfocused pane ignores navigation keys).
         match self.active_tab {
-            AppTab::NowPlaying => match self.quadrant_focus {
-                QuadrantFocus::Tracklist => match code {
+            AppTab::NowPlaying => match self.focus {
+                Focus::NowTracklist => match code {
                     KeyCode::Up | KeyCode::Char('k') => self.select_prev_track(),
                     KeyCode::Down | KeyCode::Char('j') => self.select_next_track(),
                     KeyCode::Enter => self.play_selected_track(),
                     KeyCode::Char('e') => self.open_metadata_editor_for_current(),
                     _ => {}
                 },
-                QuadrantFocus::Lyrics => {}
+                _ => {}
             },
             AppTab::Categories => match code {
-                KeyCode::Up | KeyCode::Char('k') => self.select_prev_category_item(),
-                KeyCode::Down | KeyCode::Char('j') => self.select_next_category_item(),
-                KeyCode::Char('[') | KeyCode::Char('h') => self.prev_category_type(),
-                KeyCode::Char(']') | KeyCode::Char('l') => self.next_category_type(),
-                KeyCode::Char('c') if modifiers.is_empty() => self.open_create_playlist_standalone(),
+                KeyCode::Up | KeyCode::Char('k') => match self.focus {
+                    Focus::CategoryList => self.select_prev_category_item(),
+                    Focus::CategoryTracks => self.select_prev_track(),
+                    _ => {}
+                },
+                KeyCode::Down | KeyCode::Char('j') => match self.focus {
+                    Focus::CategoryList => self.select_next_category_item(),
+                    Focus::CategoryTracks => self.select_next_track(),
+                    _ => {}
+                },
+                // Sub-tab cycling lives on the sub-tab row.
+                KeyCode::Left | KeyCode::Char('[') | KeyCode::Char('h')
+                    if self.focus == Focus::CategoryTabs =>
+                {
+                    self.prev_category_type()
+                }
+                KeyCode::Right | KeyCode::Char(']') | KeyCode::Char('l')
+                    if self.focus == Focus::CategoryTabs =>
+                {
+                    self.next_category_type()
+                }
+                KeyCode::Char('c')
+                    if modifiers.is_empty()
+                        && matches!(self.focus, Focus::CategoryList | Focus::CategoryTabs) =>
+                {
+                    self.open_create_playlist_standalone()
+                }
                 KeyCode::Esc => {
-                    self.active_tab = AppTab::NowPlaying;
+                    // Walk focus back one level; from the tab bar, leave the
+                    // tab (historical Esc behavior).
+                    match self.focus {
+                        Focus::CategoryTracks => self.focus = Focus::CategoryList,
+                        Focus::CategoryList => self.focus = Focus::CategoryTabs,
+                        Focus::CategoryTabs => self.focus = Focus::TabBar,
+                        _ => {
+                            self.active_tab = AppTab::NowPlaying;
+                            self.focus = Focus::default_for_tab(AppTab::NowPlaying);
+                        }
+                    }
                 }
-                KeyCode::Enter => {
-                    self.active_tab = AppTab::NowPlaying;
-                    self.play_selected_track();
-                }
+                KeyCode::Enter => match self.focus {
+                    // Enter on the list jumps into its tracklist.
+                    Focus::CategoryList => {
+                        self.selected_tracklist_idx = 0;
+                        self.focus = Focus::CategoryTracks;
+                    }
+                    // Enter on the tracklist plays and goes to Now Playing.
+                    Focus::CategoryTracks => {
+                        self.active_tab = AppTab::NowPlaying;
+                        self.focus = Focus::default_for_tab(AppTab::NowPlaying);
+                        self.play_selected_track();
+                    }
+                    _ => {}
+                },
                 _ => {}
             },
-            AppTab::Queue => match code {
-                KeyCode::Up | KeyCode::Char('k') => self.select_prev_track(),
-                KeyCode::Down | KeyCode::Char('j') => self.select_next_track(),
-                KeyCode::Enter => {
-                    self.active_tab = AppTab::NowPlaying;
-                    self.play_selected_track();
+            AppTab::Queue => {
+                if self.focus == Focus::QueueList {
+                    match code {
+                        KeyCode::Up | KeyCode::Char('k') => self.select_prev_track(),
+                        KeyCode::Down | KeyCode::Char('j') => self.select_next_track(),
+                        KeyCode::Enter => {
+                            self.active_tab = AppTab::NowPlaying;
+                            self.focus = Focus::default_for_tab(AppTab::NowPlaying);
+                            self.play_selected_track();
+                        }
+                        _ => {}
+                    }
                 }
-                _ => {}
-            },
+            }
+            AppTab::Settings => {
+                if self.focus == Focus::SettingsList {
+                    self.handle_settings_key(code);
+                } else if code == KeyCode::Esc {
+                    self.active_tab = AppTab::NowPlaying;
+                    self.focus = Focus::default_for_tab(AppTab::NowPlaying);
+                }
+            }
             _ => {}
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Settings tab input
+    // ------------------------------------------------------------------
+
+    /// True while the Settings list owns Left/Right (row adjustment).
+    fn settings_owns_arrows(&self) -> bool {
+        self.active_tab == AppTab::Settings && self.focus == Focus::SettingsList
+    }
+
+    fn handle_settings_key(&mut self, code: crossterm::event::KeyCode) {
+        use crossterm::event::KeyCode;
+        let rows = crate::settings::settings_rows();
+        match code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.settings_selected = self.settings_selected.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.settings_selected + 1 < rows.len() {
+                    self.settings_selected += 1;
+                }
+            }
+            KeyCode::Enter => self.settings_activate(&rows[self.settings_selected.min(rows.len() - 1)]),
+            KeyCode::Left => self.settings_adjust(&rows[self.settings_selected.min(rows.len() - 1)], -1),
+            KeyCode::Right => self.settings_adjust(&rows[self.settings_selected.min(rows.len() - 1)], 1),
+            KeyCode::Esc => {
+                self.active_tab = AppTab::NowPlaying;
+                self.focus = Focus::default_for_tab(AppTab::NowPlaying);
+            }
+            _ => {}
+        }
+    }
+
+    /// Enter on a settings row: toggle booleans, cycle art size, start a
+    /// hotkey rebind.
+    fn settings_activate(&mut self, row: &crate::settings::SettingsRow) {
+        use crate::settings::SettingsRow as Row;
+        match row {
+            Row::StartupCache => {
+                self.settings.load_library_cache_on_launch =
+                    !self.settings.load_library_cache_on_launch;
+                let state = if self.settings.load_library_cache_on_launch {
+                    "on"
+                } else {
+                    "off"
+                };
+                self.save_settings();
+                self.set_notification(format!(
+                    "💾 Load cache on launch: {} (applies next launch)",
+                    state
+                ));
+            }
+            Row::RememberState => {
+                self.settings.remember_repeat_shuffle = !self.settings.remember_repeat_shuffle;
+                let state = if self.settings.remember_repeat_shuffle {
+                    "on"
+                } else {
+                    "off"
+                };
+                // While on, snapshot the current state right away.
+                if self.settings.remember_repeat_shuffle {
+                    self.settings.saved_repeat = Some(self.audio.repeat_mode);
+                    self.settings.saved_shuffle = Some(self.audio.shuffle);
+                }
+                self.save_settings();
+                self.set_notification(format!("💾 Remember repeat/shuffle: {}", state));
+            }
+            Row::ShowLyrics => {
+                self.settings.show_lyrics_pane = !self.settings.show_lyrics_pane;
+                let state = if self.settings.show_lyrics_pane { "shown" } else { "hidden" };
+                self.save_settings();
+                self.set_notification(format!("🎤 Lyrics pane: {}", state));
+            }
+            Row::ArtSize => {
+                self.settings.art_size = self.settings.art_size.next();
+                self.save_settings();
+                self.set_notification(format!(
+                    "🖼 Album art size: {}",
+                    self.settings.art_size.label()
+                ));
+            }
+            Row::DefaultVolume => {
+                // Enter has no toggle for a number; nudge up as a convenience.
+                self.change_default_volume(5);
+            }
+            Row::Hotkey(action) => {
+                self.rebinding = Some(*action);
+                self.set_notification(format!("⌨ Press a new key for {} (Esc cancels)", action.label()));
+            }
+        }
+    }
+
+    /// Left/Right on a settings row.
+    fn settings_adjust(&mut self, row: &crate::settings::SettingsRow, dir: i32) {
+        use crate::settings::{SettingsRow as Row};
+        match row {
+            Row::DefaultVolume => self.change_default_volume(dir * 5),
+            Row::ArtSize => {
+                self.settings.art_size = if dir >= 0 {
+                    self.settings.art_size.next()
+                } else {
+                    self.settings.art_size.prev()
+                };
+                self.save_settings();
+                self.set_notification(format!("🖼 Album art size: {}", self.settings.art_size.label()));
+            }
+            // Booleans toggle on either direction.
+            Row::StartupCache | Row::RememberState | Row::ShowLyrics => {
+                self.settings_activate(row);
+            }
+            Row::Hotkey(_) => {}
+        }
+    }
+
+    /// Change the launch default volume from Settings (applies live too).
+    fn change_default_volume(&mut self, delta: i32) {
+        let current = self.settings.default_volume as i32;
+        let next = (current + delta).clamp(0, 100) as u8;
+        if next != self.settings.default_volume {
+            self.settings.default_volume = next;
+            self.audio.volume = next as u32;
+            self.save_settings();
+        }
+        self.set_notification(format!("🔊 Default volume: {}%", next));
+    }
+
+    /// Persist the settings file after a change.
+    pub fn save_settings(&mut self) {
+        self.settings.save_to(&self.config_dir);
     }
 
     // ------------------------------------------------------------------
@@ -1427,29 +1711,40 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
-    fn category_digits_switch_types_inside_categories_tab() {
-        let mut app = make_app("digits");
-        app.active_tab = AppTab::Categories;
+    fn category_subtab_digits_after_tab_focus() {
+        let mut app = make_app("subdigits");
+        // Route through the digit key so focus resets to the tab bar.
+        app.handle_key(KeyCode::Char('2'), NONE);
+        assert_eq!(app.active_tab, AppTab::Categories);
+        assert_eq!(app.focus, Focus::TabBar);
+
+        // On the tab bar, digits switch MAIN tabs (1-6).
+        app.handle_key(KeyCode::Char('1'), NONE);
+        assert_eq!(app.active_tab, AppTab::NowPlaying);
+
+        // Back to Categories and focus the sub-tab row: digits 1-5 select
+        // the category type.
+        app.handle_key(KeyCode::Char('2'), NONE);
+        app.handle_key(KeyCode::Tab, NONE);
+        assert_eq!(app.focus, Focus::CategoryTabs);
 
         app.handle_key(KeyCode::Char('1'), NONE);
-        assert_eq!(app.category_type, CategoryType::Artist);
+        assert_eq!(app.category_type, CategoryType::AlbumArtist);
         assert_eq!(app.active_tab, AppTab::Categories);
 
         app.handle_key(KeyCode::Char('2'), NONE);
-        assert_eq!(app.category_type, CategoryType::Playlist);
+        assert_eq!(app.category_type, CategoryType::Song);
 
         app.handle_key(KeyCode::Char('3'), NONE);
-        assert_eq!(app.category_type, CategoryType::Album);
+        assert_eq!(app.category_type, CategoryType::Artist);
 
         app.handle_key(KeyCode::Char('4'), NONE);
-        assert_eq!(app.category_type, CategoryType::AlbumArtist);
+        assert_eq!(app.category_type, CategoryType::Album);
 
-        // 5 always jumps to Audio Output, leaving the category type alone
         app.handle_key(KeyCode::Char('5'), NONE);
-        assert_eq!(app.active_tab, AppTab::AudioOutput);
-        assert_eq!(app.category_type, CategoryType::AlbumArtist);
+        assert_eq!(app.category_type, CategoryType::Playlist);
 
-        fs::remove_dir_all(tmp_root("digits")).ok();
+        fs::remove_dir_all(tmp_root("subdigits")).ok();
     }
 
     #[test]
@@ -1651,20 +1946,168 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
-    fn quadrant_focus_cycles_tab_and_backtab() {
-        use crate::models::QuadrantFocus;
+    fn now_playing_tab_focus_ring() {
         let mut app = make_app("focus");
-        assert_eq!(app.quadrant_focus, QuadrantFocus::Tracklist);
+        assert_eq!(app.focus, Focus::NowTracklist);
 
+        // Tab: tracklist -> lyrics -> tab bar -> tracklist.
         app.handle_key(KeyCode::Tab, NONE);
-        assert_eq!(app.quadrant_focus, QuadrantFocus::Lyrics);
+        assert_eq!(app.focus, Focus::NowLyrics);
         app.handle_key(KeyCode::Tab, NONE);
-        assert_eq!(app.quadrant_focus, QuadrantFocus::Tracklist);
+        assert_eq!(app.focus, Focus::TabBar);
+        app.handle_key(KeyCode::Tab, NONE);
+        assert_eq!(app.focus, Focus::NowTracklist);
 
+        // BackTab walks the other way.
         app.handle_key(KeyCode::BackTab, NONE);
-        assert_eq!(app.quadrant_focus, QuadrantFocus::Lyrics);
+        assert_eq!(app.focus, Focus::TabBar);
 
         fs::remove_dir_all(tmp_root("focus")).ok();
+    }
+
+    #[test]
+    fn digit_routes_by_focus_on_categories() {
+        let mut app = make_app("digits");
+        // On Now Playing (default focus), digits switch main tabs directly.
+        app.handle_key(KeyCode::Char('6'), NONE);
+        assert_eq!(app.active_tab, AppTab::Settings);
+        assert_eq!(app.focus, Focus::SettingsList);
+
+        // Categories starts on the tab bar: digits switch main tabs.
+        app.handle_key(KeyCode::Char('2'), NONE);
+        assert_eq!(app.active_tab, AppTab::Categories);
+        assert_eq!(app.focus, Focus::TabBar);
+        app.handle_key(KeyCode::Char('3'), NONE);
+        assert_eq!(app.active_tab, AppTab::Queue);
+
+        // Tab once -> sub-tab row owns the digits: 2 selects the Song type.
+        app.handle_key(KeyCode::Char('2'), NONE);
+        app.handle_key(KeyCode::Tab, NONE);
+        assert_eq!(app.focus, Focus::CategoryTabs);
+        app.handle_key(KeyCode::Char('2'), NONE);
+        assert_eq!(app.category_type, CategoryType::Song);
+        assert_eq!(app.active_tab, AppTab::Categories);
+
+        // Tab again -> the list owns Up/Down; digits do nothing there.
+        app.handle_key(KeyCode::Tab, NONE);
+        assert_eq!(app.focus, Focus::CategoryList);
+        app.handle_key(KeyCode::Char('3'), NONE);
+        assert_eq!(app.active_tab, AppTab::Categories);
+        assert_eq!(app.category_type, CategoryType::Song);
+
+        fs::remove_dir_all(tmp_root("digits")).ok();
+    }
+
+    #[test]
+    fn categories_enter_and_esc_walk_focus() {
+        let mut app = make_app("catesc");
+        // Stop the startup scan so Esc reaches tab navigation (otherwise it
+        // cancels the scan first).
+        app.scan_state = None;
+        app.handle_key(KeyCode::Char('2'), NONE); // -> Categories, tab bar
+        // Esc from the tab bar leaves Categories entirely.
+        app.handle_key(KeyCode::Esc, NONE);
+        assert_eq!(app.active_tab, AppTab::NowPlaying);
+
+        // Enter on the list jumps focus into the tracklist; Enter there
+        // plays and returns to Now Playing.
+        app.handle_key(KeyCode::Char('2'), NONE);
+        app.handle_key(KeyCode::Tab, NONE);
+        app.handle_key(KeyCode::Tab, NONE);
+        assert_eq!(app.focus, Focus::CategoryList);
+        app.handle_key(KeyCode::Enter, NONE);
+        assert_eq!(app.focus, Focus::CategoryTracks);
+        app.handle_key(KeyCode::Esc, NONE);
+        assert_eq!(app.focus, Focus::CategoryList);
+        app.handle_key(KeyCode::Enter, NONE);
+        app.handle_key(KeyCode::Enter, NONE);
+        assert_eq!(app.active_tab, AppTab::NowPlaying);
+
+        fs::remove_dir_all(tmp_root("catesc")).ok();
+    }
+
+    #[test]
+    fn hotkey_rebind_flow() {
+        let mut app = make_app("rebind");
+        // Default global key: 'n' plays next.
+        app.handle_key(KeyCode::Char('n'), NONE);
+        // Rebind NextTrack to 'x' in Settings.
+        app.handle_key(KeyCode::Char('6'), NONE);
+        let rows = crate::settings::settings_rows();
+        let next_row = rows
+            .iter()
+            .position(|r| matches!(r, crate::settings::SettingsRow::Hotkey(crate::settings::HotkeyAction::NextTrack)))
+            .unwrap();
+        app.settings_selected = next_row;
+        app.handle_key(KeyCode::Enter, NONE); // enters rebind mode
+        assert!(app.rebinding.is_some());
+        app.handle_key(KeyCode::Char('x'), NONE);
+        assert!(app.rebinding.is_none());
+        assert_eq!(app.settings.hotkey_char(crate::settings::HotkeyAction::NextTrack), 'x');
+        // The old key is released; the new key performs the action…
+        app.handle_key(KeyCode::Char('x'), NONE);
+        // …and 'n' no longer does anything global.
+        app.notification = None;
+        app.handle_key(KeyCode::Char('n'), NONE);
+        assert!(app.notification.is_none());
+
+        // Esc cancels a pending rebind.
+        app.handle_key(KeyCode::Char('6'), NONE);
+        app.handle_key(KeyCode::Enter, NONE);
+        assert!(app.rebinding.is_some());
+        app.handle_key(KeyCode::Esc, NONE);
+        assert!(app.rebinding.is_none());
+
+        // Settings persist to disk.
+        assert!(app.config_dir.join("settings.json").exists());
+
+        fs::remove_dir_all(tmp_root("rebind")).ok();
+    }
+
+    #[test]
+    fn settings_toggles_and_defaults() {
+        let mut app = make_app("setvar");
+        app.handle_key(KeyCode::Char('6'), NONE);
+        assert_eq!(app.focus, Focus::SettingsList);
+        // Row 0 = StartupCache toggle.
+        app.handle_key(KeyCode::Enter, NONE);
+        assert!(!app.settings.load_library_cache_on_launch);
+        // Left/Right on DefaultVolume adjust by 5.
+        app.settings_selected = 1;
+        app.handle_key(KeyCode::Left, NONE);
+        assert_eq!(app.settings.default_volume, 80);
+        app.handle_key(KeyCode::Right, NONE);
+        assert_eq!(app.settings.default_volume, 85);
+        // Volume changes applied live too.
+        assert_eq!(app.audio.volume, 85);
+        // ArtSize cycles with Right.
+        app.settings_selected = 4;
+        app.handle_key(KeyCode::Right, NONE);
+        assert_eq!(app.settings.art_size, crate::settings::ArtSize::Small);
+        // Reload from disk and check persistence.
+        let reloaded = crate::settings::Settings::load_from(&app.config_dir);
+        assert!(!reloaded.load_library_cache_on_launch);
+        assert_eq!(reloaded.default_volume, 85);
+        assert_eq!(reloaded.art_size, crate::settings::ArtSize::Small);
+
+        fs::remove_dir_all(tmp_root("setvar")).ok();
+    }
+
+    #[test]
+    fn remember_state_persists_repeat_shuffle() {
+        let mut app = make_app("remember");
+        // Enable remembering (row 2) while repeat=All/shuffle=Off.
+        app.handle_key(KeyCode::Char('6'), NONE);
+        app.settings_selected = 2;
+        app.handle_key(KeyCode::Enter, NONE);
+        assert!(app.settings.remember_repeat_shuffle);
+        // Toggle shuffle via the global hotkey: snapshot saved.
+        app.handle_key(KeyCode::Char('s'), NONE);
+        let reloaded = crate::settings::Settings::load_from(&app.config_dir);
+        assert_eq!(reloaded.saved_shuffle, Some(true));
+        assert_eq!(reloaded.saved_repeat, Some(crate::models::RepeatMode::All));
+
+        fs::remove_dir_all(tmp_root("remember")).ok();
     }
 
     // ------------------------------------------------------------------

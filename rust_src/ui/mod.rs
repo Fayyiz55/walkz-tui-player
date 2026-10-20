@@ -5,6 +5,7 @@ pub mod queue;
 pub mod metadata_editor;
 pub mod audio_output;
 pub mod folder_dialog;
+pub mod settings;
 
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::Frame;
@@ -37,6 +38,7 @@ pub fn render_app(f: &mut Frame, app: &App) {
         AppTab::Queue => queue::render_queue(f, app, chunks[1]),
         AppTab::MetadataEditor => metadata_editor::render_metadata_editor(f, app, chunks[1]),
         AppTab::AudioOutput => audio_output::render_audio_output(f, app, chunks[1]),
+        AppTab::Settings => settings::render_settings(f, app, chunks[1]),
     }
 
     // Overlays (z-order: scan progress first, dialogs and menus paint over it)
@@ -122,7 +124,7 @@ mod tests {
         let (app, tmp) = app_for_overlays();
         let text = render_app_to_text(&app, 120, 40);
         assert!(text.contains("Walkz TUI Player"), "brand:\n{text}");
-        assert!(text.contains("v0.3"));
+        assert!(text.contains("6 Settings"), "all six tabs visible at 120 cols:\n{text}");
         assert!(!text.contains("MYX TUI"));
         std::fs::remove_dir_all(&tmp).ok();
     }

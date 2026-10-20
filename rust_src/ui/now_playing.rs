@@ -7,7 +7,8 @@ use ratatui::Frame;
 use crate::app::App;
 use crate::cover::CoverRenderer;
 use crate::lyrics::LyricsProvider;
-use crate::models::QuadrantFocus;
+use crate::models::Focus;
+use crate::settings::ArtSize;
 
 pub fn render_now_playing(f: &mut Frame, app: &App, area: Rect) {
     // Split area into:
@@ -24,28 +25,42 @@ pub fn render_now_playing(f: &mut Frame, app: &App, area: Rect) {
     let panes_area = main_chunks[0];
     let bottom_bar_area = main_chunks[1];
 
-    // Horizontal: Left column (50%) and Right column (50%)
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
-        ])
-        .split(panes_area);
+    // Horizontal: Left column (50%) and Right column (50%). With the lyrics
+    // pane hidden in Settings the left column takes the full width, which
+    // also widens the album art.
+    let cols = if app.settings.show_lyrics_pane {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(50),
+                Constraint::Percentage(50),
+            ])
+            .split(panes_area)
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(100)])
+            .split(panes_area)
+    };
 
     let left_col = cols[0];
-    let right_col = cols[1];
 
     // Left column:
-    // - Top: Album art + song info (60%)
-    // - Bottom: Album / Playlist tracklist (40%)
+    // - Top: Album art + song info (everything the playlist pane doesn't need)
+    // - Bottom: Album / Playlist tracklist, sized to fit its track count so
+    //   the album art grows instead of the pane swallowing a fixed 40%.
     //   (the old bottom-left Categories browser was removed in v0.3;
     //    category browsing lives in the Categories tab)
+    let playlist_height = playlist_pane_height(
+        app.active_playlist_tracks.len(),
+        left_col.height,
+        app.settings.art_size,
+    );
     let left_rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(60),
-            Constraint::Percentage(40),
+            Constraint::Min(8),
+            Constraint::Length(playlist_height),
         ])
         .split(left_col);
 
@@ -55,15 +70,38 @@ pub fn render_now_playing(f: &mut Frame, app: &App, area: Rect) {
     // Right column: synchronized lyrics, full height
     render_left_top_cover_and_info(f, app, left_top_area);
     render_left_bottom_tracklist(f, app, left_bottom_area);
-    render_right_lyrics(f, app, right_col);
+    if app.settings.show_lyrics_pane {
+        render_right_lyrics(f, app, cols[1]);
+    }
 
     // Render Bottom Transport Bar
     render_bottom_controls_bar(f, app, bottom_bar_area);
 }
 
+/// Height of the bottom-left playlist pane: exactly `tracks + borders` when
+/// that fits, clamped to [3, `available * art_size cap`]. A smaller cap
+/// reserves more room (resolution) for the album art.
+pub fn playlist_pane_height(track_count: usize, available: u16, art_size: ArtSize) -> u16 {
+    let wanted = (track_count as u16).saturating_add(2); // + top/bottom border
+    let cap = (available * art_size.playlist_cap_percent() / 100).max(3);
+    wanted.min(cap).max(3)
+}
+
+/// First visible list row for a selection kept within a scrolling window of
+/// `visible` rows (standard bottom-edge clamping).
+pub fn scroll_start(selected: usize, visible: usize) -> usize {
+    if visible == 0 {
+        0
+    } else if selected < visible {
+        0
+    } else {
+        selected + 1 - visible
+    }
+}
+
 /// [Left Bottom]: Album / Playlist tracklist
 fn render_left_bottom_tracklist(f: &mut Frame, app: &App, area: Rect) {
-    let is_focused = app.quadrant_focus == QuadrantFocus::Tracklist;
+    let is_focused = app.focus == Focus::NowTracklist;
     let border_style = if is_focused {
         Style::default().fg(Color::Cyan)
     } else {
@@ -94,9 +132,18 @@ fn render_left_bottom_tracklist(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let current_track_id = app.audio.current_track.as_ref().map(|t| t.id.as_str());
+    let visible = inner.height as usize;
+    let start = scroll_start(app.selected_tracklist_idx, visible);
+
     let mut items = Vec::new();
 
-    for (pos, &track_idx) in app.active_playlist_tracks.iter().enumerate() {
+    for (pos, &track_idx) in app
+        .active_playlist_tracks
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible)
+    {
         if let Some(track) = app.library.tracks.get(track_idx) {
             let is_selected = is_focused && pos == app.selected_tracklist_idx;
             let is_now_playing = current_track_id == Some(track.id.as_str());
@@ -252,7 +299,7 @@ fn render_left_top_cover_and_info(f: &mut Frame, app: &App, area: Rect) {
 
 /// [Right]: Synchronized lyrics, full height
 fn render_right_lyrics(f: &mut Frame, app: &App, area: Rect) {
-    let is_focused = app.quadrant_focus == QuadrantFocus::Lyrics;
+    let is_focused = app.focus == Focus::NowLyrics;
     let border_style = if is_focused {
         Style::default().fg(Color::Cyan)
     } else {
@@ -380,7 +427,27 @@ fn render_bottom_controls_bar(f: &mut Frame, app: &App, area: Rect) {
     let repeat_badge = format!("🔁 {}", app.audio.repeat_mode.label());
     let shuffle_badge = if app.audio.shuffle { "🔀 On" } else { "🔀 Off" };
 
-    let notif = app.get_active_notification().unwrap_or("[o] Open Folder  [S] Scan  [a] Song Menu  [Space] Play/Pause  [n/p] Next/Prev  [←/→] Seek  [↑/↓] Volume  [Tab] Focus  [q] Quit");
+    // Shortcuts hint reflecting the user's (possibly rebound) hotkeys.
+    let hk = |action: crate::settings::HotkeyAction| -> String {
+        let c = app.settings.hotkey_char(action);
+        if c == ' ' {
+            "Space".to_string()
+        } else {
+            c.to_string()
+        }
+    };
+    let default_hint = format!(
+        "[{}] Open Folder  [{}] Scan  [{}] Song Menu  [{}] Play/Pause  [{}/{}] Next/Prev  [←/→] Seek  [↑/↓] Volume  [Tab] Focus  [q] Quit",
+        hk(crate::settings::HotkeyAction::OpenFolder),
+        hk(crate::settings::HotkeyAction::Rescan),
+        hk(crate::settings::HotkeyAction::SongMenu),
+        hk(crate::settings::HotkeyAction::PlayPause),
+        hk(crate::settings::HotkeyAction::PrevTrack),
+        hk(crate::settings::HotkeyAction::NextTrack),
+    );
+    let notif = app
+        .get_active_notification()
+        .unwrap_or(default_hint.as_str());
 
     let controls_line = Line::from(vec![
         Span::styled(format!(" {} ", status_str), Style::default().fg(Color::Black).bg(status_color).add_modifier(Modifier::BOLD)),
@@ -509,6 +576,63 @@ mod tests {
         assert!(text.contains("Album Art"), "{text}");
         assert!(text.contains("Playlist:"), "{text}");
         assert!(text.contains("Synchronized Lyrics"), "{text}");
+    }
+
+    #[test]
+    fn playlist_pane_height_fits_and_caps() {
+        use crate::settings::ArtSize;
+        // Small album: exact fit (tracks + 2 border rows).
+        assert_eq!(playlist_pane_height(8, 40, ArtSize::Medium), 10);
+        // Big playlist: capped by the art-size share of the column.
+        assert_eq!(playlist_pane_height(500, 40, ArtSize::Medium), 18); // 45%
+        // Art size drives the cap: Large art = smaller playlist cap.
+        assert_eq!(playlist_pane_height(500, 40, ArtSize::Large), 12); // 30%
+        assert_eq!(playlist_pane_height(500, 40, ArtSize::Small), 24); // 60%
+        // Never smaller than one content row.
+        assert_eq!(playlist_pane_height(0, 40, ArtSize::Medium), 3);
+    }
+
+    #[test]
+    fn scroll_start_keeps_selection_visible() {
+        assert_eq!(scroll_start(0, 10), 0);
+        assert_eq!(scroll_start(9, 10), 0);
+        assert_eq!(scroll_start(10, 10), 1);
+        assert_eq!(scroll_start(25, 10), 16);
+        // Moving back above the window snaps to the top.
+        assert_eq!(scroll_start(3, 10), 0);
+        // Degenerate area.
+        assert_eq!(scroll_start(7, 0), 0);
+    }
+
+    #[test]
+    fn small_album_playlist_pane_fits_track_count() {
+        // 3-track album: the playlist pane shrinks to fit, leaving the art
+        // more room than the old fixed 40% split.
+        let mut app = app_with_track(make_track("ALAC", Some(44100), Some(16)));
+        let mut t1 = make_track("ALAC", Some(44100), Some(16));
+        let mut t2 = make_track("MP3", Some(44100), None);
+        let mut t3 = make_track("FLAC", Some(48000), Some(24));
+        t1.track_number = Some(1);
+        t2.track_number = Some(2);
+        t3.track_number = Some(3);
+        app.library.tracks = vec![t1, t2, t3];
+        app.active_playlist_tracks = vec![0, 1, 2];
+        let text = render_to_text(&app, 110, 40);
+        assert!(text.contains("Playlist:"), "{text}");
+        // All three track titles visible (they are the same title here, so
+        // check the numbered entries exist).
+        assert!(text.contains("01."), "{text}");
+        assert!(text.contains("03."), "{text}");
+    }
+
+    #[test]
+    fn hidden_lyrics_pane_gives_left_column_full_width() {
+        let mut app = app_with_track(make_track("ALAC", Some(44100), Some(16)));
+        app.settings.show_lyrics_pane = false;
+        let text = render_to_text(&app, 110, 40);
+        assert!(text.contains("Album Art"), "{text}");
+        assert!(text.contains("Playlist:"), "{text}");
+        assert!(!text.contains("Synchronized Lyrics"), "{text}");
     }
 
     #[test]

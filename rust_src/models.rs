@@ -8,6 +8,7 @@ pub enum AppTab {
     Queue = 2,
     MetadataEditor = 3,
     AudioOutput = 4,
+    Settings = 5,
 }
 
 #[allow(dead_code)]
@@ -18,17 +19,19 @@ impl AppTab {
             Self::Categories => Self::Queue,
             Self::Queue => Self::MetadataEditor,
             Self::MetadataEditor => Self::AudioOutput,
-            Self::AudioOutput => Self::NowPlaying,
+            Self::AudioOutput => Self::Settings,
+            Self::Settings => Self::NowPlaying,
         }
     }
 
     pub fn prev(&self) -> Self {
         match self {
-            Self::NowPlaying => Self::AudioOutput,
+            Self::NowPlaying => Self::Settings,
             Self::Categories => Self::NowPlaying,
             Self::Queue => Self::Categories,
             Self::MetadataEditor => Self::Queue,
             Self::AudioOutput => Self::MetadataEditor,
+            Self::Settings => Self::AudioOutput,
         }
     }
 
@@ -39,29 +42,101 @@ impl AppTab {
             2 => Self::Queue,
             3 => Self::MetadataEditor,
             4 => Self::AudioOutput,
+            5 => Self::Settings,
             _ => Self::NowPlaying,
         }
     }
 }
 
+/// Where keyboard focus sits inside the active tab. Tab/BackTab move along a
+/// per-tab ring ([`Focus::next_in_tab`]/[`Focus::prev_in_tab`]); number keys
+/// act on the focused area (tab bar digits switch main tabs, category
+/// sub-tab digits switch the category type).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QuadrantFocus {
-    Tracklist,
-    Lyrics,
+pub enum Focus {
+    /// The main tab bar in the header (digits 1-6 switch tabs).
+    TabBar,
+    // --- Now Playing ---
+    NowTracklist,
+    NowLyrics,
+    // --- Categories ---
+    /// The sub-tab row: [1] Album Artist [2] Song [3] Artists [4] Album [5] Playlist
+    CategoryTabs,
+    /// The category item list (left column).
+    CategoryList,
+    /// The "Tracks in '<category>'" list (right column).
+    CategoryTracks,
+    // --- Queue ---
+    QueueList,
+    // --- Settings ---
+    SettingsList,
 }
 
-impl QuadrantFocus {
-    pub fn next(&self) -> Self {
-        match self {
-            Self::Tracklist => Self::Lyrics,
-            Self::Lyrics => Self::Tracklist,
+impl Focus {
+    /// Next focusable area within the given tab's ring (Tab key).
+    pub fn next_in_tab(&self, tab: AppTab) -> Self {
+        use AppTab as T;
+        match tab {
+            T::NowPlaying => match self {
+                Self::NowTracklist => Self::NowLyrics,
+                Self::NowLyrics => Self::TabBar,
+                _ => Self::NowTracklist,
+            },
+            T::Categories => match self {
+                Self::TabBar => Self::CategoryTabs,
+                Self::CategoryTabs => Self::CategoryList,
+                Self::CategoryList => Self::CategoryTracks,
+                _ => Self::TabBar,
+            },
+            T::Queue => match self {
+                Self::QueueList => Self::TabBar,
+                _ => Self::QueueList,
+            },
+            T::AudioOutput | T::MetadataEditor => Self::TabBar,
+            T::Settings => match self {
+                Self::SettingsList => Self::TabBar,
+                _ => Self::SettingsList,
+            },
         }
     }
 
-    pub fn prev(&self) -> Self {
-        match self {
-            Self::Tracklist => Self::Lyrics,
-            Self::Lyrics => Self::Tracklist,
+    /// Previous focusable area within the given tab's ring (Shift+Tab).
+    pub fn prev_in_tab(&self, tab: AppTab) -> Self {
+        use AppTab as T;
+        match tab {
+            T::NowPlaying => match self {
+                Self::NowTracklist => Self::TabBar,
+                Self::NowLyrics => Self::NowTracklist,
+                _ => Self::NowLyrics,
+            },
+            T::Categories => match self {
+                Self::TabBar => Self::CategoryTracks,
+                Self::CategoryTabs => Self::TabBar,
+                Self::CategoryList => Self::CategoryTabs,
+                _ => Self::CategoryList,
+            },
+            T::Queue => match self {
+                Self::QueueList => Self::TabBar,
+                _ => Self::QueueList,
+            },
+            T::AudioOutput | T::MetadataEditor => Self::TabBar,
+            T::Settings => match self {
+                Self::SettingsList => Self::TabBar,
+                _ => Self::SettingsList,
+            },
+        }
+    }
+
+    /// Focus used when a tab becomes active.
+    pub fn default_for_tab(tab: AppTab) -> Self {
+        use AppTab as T;
+        match tab {
+            T::NowPlaying => Self::NowTracklist,
+            T::Categories => Self::TabBar,
+            T::Queue => Self::QueueList,
+            T::MetadataEditor => Self::TabBar,
+            T::AudioOutput => Self::TabBar,
+            T::Settings => Self::SettingsList,
         }
     }
 }
@@ -163,51 +238,136 @@ mod tests {
     }
 
     #[test]
-    fn focus_cycles_two_way() {
-        assert_eq!(QuadrantFocus::Tracklist.next(), QuadrantFocus::Lyrics);
-        assert_eq!(QuadrantFocus::Lyrics.next(), QuadrantFocus::Tracklist);
-        assert_eq!(QuadrantFocus::Tracklist.prev(), QuadrantFocus::Lyrics);
-        assert_eq!(QuadrantFocus::Lyrics.prev(), QuadrantFocus::Tracklist);
+    fn now_playing_focus_ring() {
+        // Tab bar -> tracklist -> lyrics -> back to tab bar.
+        assert_eq!(
+            Focus::NowTracklist.next_in_tab(AppTab::NowPlaying),
+            Focus::NowLyrics
+        );
+        assert_eq!(Focus::NowLyrics.next_in_tab(AppTab::NowPlaying), Focus::TabBar);
+        assert_eq!(Focus::TabBar.next_in_tab(AppTab::NowPlaying), Focus::NowTracklist);
+        // Shift+Tab walks the ring the other way.
+        assert_eq!(Focus::TabBar.prev_in_tab(AppTab::NowPlaying), Focus::NowLyrics);
+        assert_eq!(
+            Focus::NowLyrics.prev_in_tab(AppTab::NowPlaying),
+            Focus::NowTracklist
+        );
+        assert_eq!(
+            Focus::NowTracklist.prev_in_tab(AppTab::NowPlaying),
+            Focus::TabBar
+        );
+    }
+
+    #[test]
+    fn categories_focus_ring() {
+        // Tab bar -> sub-tabs -> category list -> tracklist -> wrap.
+        assert_eq!(Focus::TabBar.next_in_tab(AppTab::Categories), Focus::CategoryTabs);
+        assert_eq!(
+            Focus::CategoryTabs.next_in_tab(AppTab::Categories),
+            Focus::CategoryList
+        );
+        assert_eq!(
+            Focus::CategoryList.next_in_tab(AppTab::Categories),
+            Focus::CategoryTracks
+        );
+        assert_eq!(
+            Focus::CategoryTracks.next_in_tab(AppTab::Categories),
+            Focus::TabBar
+        );
+        // And backwards.
+        assert_eq!(Focus::TabBar.prev_in_tab(AppTab::Categories), Focus::CategoryTracks);
+        assert_eq!(
+            Focus::CategoryList.prev_in_tab(AppTab::Categories),
+            Focus::CategoryTabs
+        );
+    }
+
+    #[test]
+    fn default_focus_per_tab() {
+        assert_eq!(Focus::default_for_tab(AppTab::NowPlaying), Focus::NowTracklist);
+        assert_eq!(Focus::default_for_tab(AppTab::Categories), Focus::TabBar);
+        assert_eq!(Focus::default_for_tab(AppTab::Queue), Focus::QueueList);
+        assert_eq!(Focus::default_for_tab(AppTab::AudioOutput), Focus::TabBar);
+        assert_eq!(Focus::default_for_tab(AppTab::Settings), Focus::SettingsList);
+    }
+
+    #[test]
+    fn app_tab_settings_in_cycle() {
+        assert_eq!(AppTab::AudioOutput.next(), AppTab::Settings);
+        assert_eq!(AppTab::Settings.next(), AppTab::NowPlaying);
+        assert_eq!(AppTab::Settings.prev(), AppTab::AudioOutput);
+        assert_eq!(AppTab::from_index(5), AppTab::Settings);
+        assert_eq!(AppTab::from_index(6), AppTab::NowPlaying);
+    }
+
+    #[test]
+    fn category_type_numbering() {
+        // Sub-tab numbering: 1 Album Artist, 2 Song, 3 Artists, 4 Album, 5 Playlist.
+        let all = CategoryType::all();
+        assert_eq!(
+            all,
+            [
+                CategoryType::AlbumArtist,
+                CategoryType::Song,
+                CategoryType::Artist,
+                CategoryType::Album,
+                CategoryType::Playlist
+            ]
+        );
+        assert_eq!(all[0].title(), "Album Artist");
+        assert_eq!(all[1].title(), "Song");
+        assert_eq!(all[2].title(), "Artists");
+        assert_eq!(all[3].title(), "Album");
+        assert_eq!(all[4].title(), "Playlist");
+        // next()/prev() follow the same ring.
+        assert_eq!(CategoryType::AlbumArtist.next(), CategoryType::Song);
+        assert_eq!(CategoryType::Playlist.next(), CategoryType::AlbumArtist);
+        assert_eq!(CategoryType::Song.prev(), CategoryType::AlbumArtist);
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CategoryType {
     Artist = 0,
-    Playlist = 1,
-    Album = 2,
-    AlbumArtist = 3,
+    Song = 1,
+    Playlist = 2,
+    Album = 3,
+    AlbumArtist = 4,
 }
 
 impl CategoryType {
-    pub fn all() -> [Self; 4] {
-        [Self::Artist, Self::Playlist, Self::Album, Self::AlbumArtist]
+    /// Sub-tab order: [1] Album Artist [2] Song [3] Artists [4] Album [5] Playlist.
+    pub fn all() -> [Self; 5] {
+        [Self::AlbumArtist, Self::Song, Self::Artist, Self::Album, Self::Playlist]
     }
 
     pub fn title(&self) -> &'static str {
         match self {
-            Self::Artist => "Artist",
-            Self::Playlist => "Playlist",
-            Self::Album => "Album",
             Self::AlbumArtist => "Album Artist",
+            Self::Song => "Song",
+            Self::Artist => "Artists",
+            Self::Album => "Album",
+            Self::Playlist => "Playlist",
         }
     }
 
     pub fn next(&self) -> Self {
         match self {
-            Self::Artist => Self::Playlist,
-            Self::Playlist => Self::Album,
-            Self::Album => Self::AlbumArtist,
-            Self::AlbumArtist => Self::Artist,
+            Self::AlbumArtist => Self::Song,
+            Self::Song => Self::Artist,
+            Self::Artist => Self::Album,
+            Self::Album => Self::Playlist,
+            Self::Playlist => Self::AlbumArtist,
         }
     }
 
     pub fn prev(&self) -> Self {
         match self {
-            Self::Artist => Self::AlbumArtist,
-            Self::Playlist => Self::Artist,
-            Self::Album => Self::Playlist,
-            Self::AlbumArtist => Self::Album,
+            Self::AlbumArtist => Self::Playlist,
+            Self::Song => Self::AlbumArtist,
+            Self::Artist => Self::Song,
+            Self::Album => Self::Artist,
+            Self::Playlist => Self::Album,
         }
     }
 }
