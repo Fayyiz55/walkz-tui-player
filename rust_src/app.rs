@@ -161,6 +161,18 @@ pub struct App {
     pub settings_selected: usize,
     /// When set, the next plain keystroke rebinds this hotkey (Settings tab).
     pub rebinding: Option<crate::settings::HotkeyAction>,
+    /// Prepared ambient backdrop (blurred album art / tint ramp), cached per
+    /// (track, area dims, dimming, style).
+    pub ambient_cache: std::cell::RefCell<Option<crate::ambient::AmbientCache>>,
+    /// cava spectrum worker (None = not running).
+    pub viz: Option<crate::viz::VizWorker>,
+    /// Latest decoded spectrum frame (values 0.0..1.0).
+    pub viz_frame: Option<Vec<f32>>,
+    /// Input-method attempt ladder (0 pipewire, 1 pulse, ≥2 unavailable).
+    viz_attempt: usize,
+    /// `cava` missing from PATH / unusable (settled until the visualizer is
+    /// toggled again in Settings).
+    pub viz_unavailable: bool,
 }
 
 /// One lazily loaded artwork payload.
@@ -236,6 +248,11 @@ impl App {
             settings,
             settings_selected: 0,
             rebinding: None,
+            ambient_cache: std::cell::RefCell::new(None),
+            viz: None,
+            viz_frame: None,
+            viz_attempt: 0,
+            viz_unavailable: false,
         };
 
         // Apply user defaults: launch volume and remembered playback state.
@@ -388,6 +405,13 @@ impl App {
             H::SongMenu => self.open_song_menu(),
             H::OpenFolder => self.open_folder_dialog(),
             H::Rescan => self.manual_rescan(),
+            H::ToggleAmbient => {
+                self.settings.ambient_enabled = !self.settings.ambient_enabled;
+                let state = if self.settings.ambient_enabled { "On" } else { "Off" };
+                self.save_settings();
+                self.invalidate_ambient();
+                self.set_notification(format!("🖼 Ambient background: {}", state));
+            }
         }
     }
 
@@ -1720,6 +1744,39 @@ impl App {
                     self.settings.art_size.label()
                 ));
             }
+            Row::AmbientEnabled => {
+                self.settings.ambient_enabled = !self.settings.ambient_enabled;
+                let state = if self.settings.ambient_enabled { "On" } else { "Off" };
+                self.save_settings();
+                self.invalidate_ambient();
+                self.set_notification(format!("🖼 Ambient background: {}", state));
+            }
+            Row::AmbientStyle => {
+                self.settings.ambient_style = self.settings.ambient_style.next();
+                self.save_settings();
+                self.invalidate_ambient();
+                self.set_notification(format!(
+                    "🖼 Ambient style: {}",
+                    self.settings.ambient_style.label()
+                ));
+            }
+            Row::AmbientDimming => {
+                self.adjust_ambient_dimming(5);
+            }
+            Row::Visualizer => {
+                self.settings.visualizer_enabled = !self.settings.visualizer_enabled;
+                let state = if self.settings.visualizer_enabled { "On" } else { "Off" };
+                self.save_settings();
+                if self.settings.visualizer_enabled {
+                    // Fresh retry of the input-method ladder.
+                    self.viz_unavailable = false;
+                    self.viz_attempt = 0;
+                } else {
+                    self.viz.take(); // Drop kills the child
+                    self.viz_frame = None;
+                }
+                self.set_notification(format!("📊 Spectrum visualizer: {}", state));
+            }
             Row::VolumeStep => {
                 self.adjust_volume_step(1);
             }
@@ -1761,6 +1818,7 @@ impl App {
             }
             Row::VolumeStep => self.adjust_volume_step(dir),
             Row::SeekStep => self.adjust_seek_step(dir),
+            Row::AmbientDimming => self.adjust_ambient_dimming(dir * 5),
             Row::Accent => {
                 self.settings.accent = if dir >= 0 {
                     self.settings.accent.next()
@@ -1770,12 +1828,30 @@ impl App {
                 self.save_settings();
                 self.set_notification(format!("🎨 Accent color: {}", self.settings.accent.label()));
             }
+            // Booleans and cycled enums toggle/step on either direction.
+            Row::AmbientEnabled | Row::AmbientStyle | Row::Visualizer => {
+                self.settings_activate(row);
+            }
             // Booleans toggle on either direction.
             Row::StartupCache | Row::RememberState | Row::ShowLyrics => {
                 self.settings_activate(row);
             }
             Row::MusicFolder | Row::Hotkey(_) => {}
         }
+    }
+
+    /// Adjust the ambient backdrop dimming (25-75 %) from Settings.
+    fn adjust_ambient_dimming(&mut self, delta: i32) {
+        let next = (self.settings.ambient_dimming as i32 + delta).clamp(
+            crate::settings::AMBIENT_DIMMING_MIN as i32,
+            crate::settings::AMBIENT_DIMMING_MAX as i32,
+        ) as u8;
+        if next != self.settings.ambient_dimming {
+            self.settings.ambient_dimming = next;
+            self.save_settings();
+            self.invalidate_ambient();
+        }
+        self.set_notification(format!("🌗 Background dimming: {}%", next));
     }
 
     /// Adjust the volume step (1-25 %) from Settings.
@@ -1817,13 +1893,83 @@ impl App {
         self.settings.save_to(&self.config_dir);
     }
 
+    /// Drop the prepared ambient backdrop so the next frame rebuilds it
+    /// (track-independent knobs changed: style, dimming, on/off).
+    pub fn invalidate_ambient(&self) {
+        self.ambient_cache.borrow_mut().take();
+    }
+
+    /// Whether the cava binary is known to be missing/unusable (Settings
+    /// shows an install hint instead of an empty lane).
+    pub fn viz_missing(&self) -> bool {
+        self.viz_unavailable
+    }
+
     // ------------------------------------------------------------------
     // Tick
     // ------------------------------------------------------------------
 
+    /// Start/stop the cava worker per the Settings toggle, escalate through
+    /// input methods when the child dies (silently-broken audio system), and
+    /// grab the latest spectrum frame. Restart attempts settle into
+    /// `viz_unavailable` after the ladder is exhausted, so a broken setup
+    /// costs nothing per tick.
+    fn poll_visualizer(&mut self) {
+        if !self.settings.visualizer_enabled {
+            if self.viz.take().is_some() {
+                self.viz_frame = None;
+            }
+            return;
+        }
+        if self.viz_unavailable {
+            return;
+        }
+        if self.viz.is_none() {
+            if self.viz_attempt as usize >= crate::viz::INPUT_METHODS.len() {
+                self.viz_unavailable = true;
+                self.set_notification(
+                    "📊 cava unavailable — check your audio system / install: sudo apt install cava",
+                );
+                return;
+            }
+            match crate::viz::VizWorker::spawn(&self.config_dir, self.viz_attempt) {
+                Ok(worker) => self.viz = Some(worker),
+                Err(crate::viz::SpawnError::Missing) => {
+                    self.viz_unavailable = true;
+                    self.set_notification("📊 cava not found — install: sudo apt install cava");
+                    return;
+                }
+                Err(crate::viz::SpawnError::Io(e)) => {
+                    // IO trouble (config write, permissions): settle instead
+                    // of respawning every tick.
+                    self.viz_unavailable = true;
+                    self.set_notification(format!("📊 visualizer off — cava error: {e}"));
+                    return;
+                }
+            }
+        }
+        // A dead child advances the pipewire → pulse ladder via the
+        // worker's own method index; the respawn happens on the next tick.
+        let alive = self.viz.as_mut().map(|v| v.alive()).unwrap_or(false);
+        if !alive {
+            self.viz_attempt = self
+                .viz
+                .as_ref()
+                .and_then(|v| v.next_method_idx())
+                .unwrap_or(crate::viz::INPUT_METHODS.len());
+            self.viz.take(); // Drop reaps the corpse
+            self.viz_frame = None;
+            return;
+        }
+        if let Some(worker) = &mut self.viz {
+            self.viz_frame = worker.latest();
+        }
+    }
+
     /// Main event loop tick
     pub fn tick(&mut self) {
         self.poll_scan();
+        self.poll_visualizer();
         let track_finished = self.audio.tick();
         if track_finished {
             match self.audio.repeat_mode {

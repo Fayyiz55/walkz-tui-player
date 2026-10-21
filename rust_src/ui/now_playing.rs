@@ -4,6 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, Paragraph};
 use ratatui::Frame;
 
+use crate::ambient;
 use crate::app::App;
 use crate::cover::CoverRenderer;
 use crate::lyrics::LyricsProvider;
@@ -11,19 +12,28 @@ use crate::models::Focus;
 use crate::settings::ArtSize;
 
 pub fn render_now_playing(f: &mut Frame, app: &App, area: Rect) {
+    // Ambient backdrop first: blurred album art / tint ramp underneath
+    // every widget below (widgets draw over it; ratatui's patch semantics
+    // keep the backdrop's cell backgrounds wherever a widget does not paint
+    // its own background).
+    ambient::render_ambient(f, app, area);
+
     // Split area into:
     // 1. Panes main area (Min 14)
-    // 2. Bottom transport & progress bar (Length 4)
+    // 2. Spectrum lane (Length 6 while the cava visualizer is on, else 0)
+    // 3. Bottom transport & progress bar (Length 4)
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(14),
+            Constraint::Length(spectrum_lane_height(app)),
             Constraint::Length(4),
         ])
         .split(area);
 
     let panes_area = main_chunks[0];
-    let bottom_bar_area = main_chunks[1];
+    let spectrum_area = main_chunks[1];
+    let bottom_bar_area = main_chunks[2];
 
     // Horizontal: Left column (50%) and Right column (50%). With the lyrics
     // pane hidden in Settings the left column takes the full width, which
@@ -74,8 +84,95 @@ pub fn render_now_playing(f: &mut Frame, app: &App, area: Rect) {
         render_right_lyrics(f, app, cols[1]);
     }
 
+    // Spectrum lane (between the panes and the transport bar)
+    render_spectrum(f, app, spectrum_area);
+
     // Render Bottom Transport Bar
     render_bottom_controls_bar(f, app, bottom_bar_area);
+}
+
+/// Height of the cava spectrum lane: 6 rows while the visualizer is enabled
+/// in Settings (collapses to 0 when disabled or when `cava` is missing, so
+/// the panes regain the space).
+pub fn spectrum_lane_height(app: &App) -> u16 {
+    if app.settings.visualizer_enabled && !app.viz_missing() {
+        6
+    } else {
+        0
+    }
+}
+
+/// cava spectrum bars: one column per cell, frame values sampled across the
+/// terminal width, drawn with eighth-block sub-cell resolution. Bar bodies
+/// set only the foreground color, so the ambient backdrop shows through
+/// behind and between the bars.
+fn render_spectrum(f: &mut Frame, app: &App, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let Some(frame) = &app.viz_frame else {
+        return;
+    };
+    if frame.is_empty() || area.width < 16 {
+        return;
+    }
+
+    let accent = app.accent();
+    let bars = frame.len();
+    let width = area.width as usize;
+    let height = area.height as usize;
+    let buf = f.buffer_mut();
+
+    for col in 0..width {
+        // Sample the frame across the width (nearest bar per column).
+        let idx = (col * bars) / width;
+        let v = frame[idx.min(bars - 1)];
+        if v <= 0.0 {
+            continue;
+        }
+        let lit = (v * height as f32).clamp(0.0, height as f32);
+        let full_cells = lit.floor() as usize;
+        let frac = lit - full_cells as f32;
+
+        for row in 0..height {
+            let from_bottom = height - 1 - row; // draw bottom-up
+            let (symbol, strength) = if from_bottom < full_cells {
+                ("█", body_brightness(from_bottom, height))
+            } else if from_bottom == full_cells && frac > 0.08 {
+                (eighth_glyph(frac), 1.0)
+            } else {
+                continue;
+            };
+            if let Some(cell) = buf.cell_mut((area.x + col as u16, area.y + row as u16)) {
+                cell.set_symbol(symbol);
+                cell.set_fg(scale_rgb(accent, strength));
+            }
+        }
+    }
+}
+
+/// Body brightness grows toward the bar tip (row 0 = the tip row).
+fn body_brightness(from_bottom: usize, height: usize) -> f32 {
+    0.45 + 0.50 * ((from_bottom + 1) as f32 / height.max(1) as f32)
+}
+
+/// Eighth-block glyph for the partially-lit tip cell.
+fn eighth_glyph(frac: f32) -> &'static str {
+    const GLYPHS: [&str; 7] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇"];
+    let idx = ((frac * 7.0) as usize).min(GLYPHS.len() - 1);
+    GLYPHS[idx]
+}
+
+/// Scale an RGB color by `k` (named colors pass through untouched).
+fn scale_rgb(color: Color, k: f32) -> Color {
+    match color {
+        Color::Rgb(r, g, b) => Color::Rgb(
+            ((r as f32) * k).round() as u8,
+            ((g as f32) * k).round() as u8,
+            ((b as f32) * k).round() as u8,
+        ),
+        other => other,
+    }
 }
 
 /// Height of the bottom-left playlist pane: exactly `tracks + borders` when
@@ -663,5 +760,98 @@ mod tests {
         // Second render hits the cache (no panic, still rendered)
         let text2 = render_to_text(&app, 110, 40);
         assert!(text2.contains('▀') || text2.contains('▄') || text2.contains('█'));
+    }
+
+    #[test]
+    fn spectrum_lane_height_follows_settings_and_availability() {
+        let app = app_with_track(make_track("ALAC", Some(44100), Some(16)));
+        assert_eq!(spectrum_lane_height(&app), 6);
+        let mut off = app_with_track(make_track("ALAC", Some(44100), Some(16)));
+        off.settings.visualizer_enabled = false;
+        assert_eq!(spectrum_lane_height(&off), 0);
+        let mut missing = app_with_track(make_track("ALAC", Some(44100), Some(16)));
+        missing.viz_unavailable = true;
+        assert_eq!(spectrum_lane_height(&missing), 0);
+    }
+
+    #[test]
+    fn spectrum_draws_bars_from_the_latest_frame() {
+        let mut app = app_with_track(make_track("ALAC", Some(44100), Some(16)));
+        app.viz_frame = Some(vec![1.0; 48]);
+        let (buf, w, h) = {
+            let backend = TestBackend::new(110, 40);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|f| render_now_playing(f, &app, f.area())).unwrap();
+            let buf = terminal.backend().buffer().clone();
+            (buf, 110usize, 40usize)
+        };
+        // The bottom-most spectrum row (above the 4-row transport bar) is
+        // fully lit '█' columns in the accent color for a full-scale frame.
+        let lane_bottom = h - 1 - 4; // last row of the 6-row lane
+        let lit: Vec<_> = buf
+            .content
+            .iter()
+            .enumerate()
+            .filter(|(i, c)| {
+                let (x, y) = (i % w, i / w);
+                y == lane_bottom && x >= 2 && x < w - 2 && c.symbol() == "█"
+            })
+            .collect();
+        assert!(lit.len() > 20, "expected a filled spectrum row, got {} bars", lit.len());
+    }
+
+    #[test]
+    fn ambient_tint_sets_cell_backgrounds_when_enabled() {
+        // Halfblocks picker + no cover art: ambient falls back to the
+        // title-hue tint ramp (pure cell background colors).
+        let mut app = app_with_track(make_track("ALAC", Some(44100), Some(16)));
+        app.picker = Some(ratatui_image::picker::Picker::halfblocks());
+        let backend = TestBackend::new(110, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render_now_playing(f, &app, f.area())).unwrap();
+        let buf = terminal.backend().buffer();
+        let tinted = buf
+            .content
+            .iter()
+            .filter(|c| c.symbol() == " " && c.bg != Color::Reset)
+            .count();
+        assert!(tinted > 100, "tint ramp should color empty cells: {}", tinted);
+    }
+
+    /// Cells painted with a background on spaces — the ambient tint's
+    /// footprint (minus the legitimate widget backgrounds like selection
+    /// highlights, which appear in both baselines).
+    fn tinted_space_count(app: &App) -> usize {
+        let backend = TestBackend::new(110, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render_now_playing(f, app, f.area())).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .filter(|c| c.symbol() == " " && c.bg != Color::Reset)
+            .count()
+    }
+
+    #[test]
+    fn ambient_off_leaves_cell_backgrounds_untouched() {
+        // Halfblocks picker + no cover art: the ambient tint must add a
+        // large number of colored spaces when enabled and return exactly to
+        // the widget-background baseline when disabled.
+        let mut off = app_with_track(make_track("ALAC", Some(44100), Some(16)));
+        off.picker = Some(ratatui_image::picker::Picker::halfblocks());
+        off.settings.ambient_enabled = false;
+        let baseline = tinted_space_count(&off);
+
+        let mut on = app_with_track(make_track("ALAC", Some(44100), Some(16)));
+        on.picker = Some(ratatui_image::picker::Picker::halfblocks());
+        let tinted = tinted_space_count(&on);
+        assert!(tinted > baseline + 300, "on={tinted} baseline={baseline}");
+
+        // Disabled again → back to the baseline.
+        on.settings.ambient_enabled = false;
+        on.invalidate_ambient();
+        assert_eq!(tinted_space_count(&on), baseline);
     }
 }

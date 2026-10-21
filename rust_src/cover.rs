@@ -5,6 +5,17 @@ use ratatui_image::{protocol::Protocol, Resize};
 
 pub struct CoverRenderer;
 
+/// DJB2 title hash → pseudo-random RGB, shared by the procedural vinyl
+/// placeholder and the ambient backdrop's hue fallback (deterministic per
+/// title, so a track's vinyl art and its ambient hue always agree).
+pub(crate) fn title_hash_rgb(title: &str) -> (u8, u8, u8) {
+    let mut hash: u32 = 5381;
+    for b in title.bytes() {
+        hash = ((hash << 5).wrapping_add(hash)).wrapping_add(b as u32);
+    }
+    ((hash & 0xFF) as u8, ((hash >> 8) & 0xFF) as u8, ((hash >> 16) & 0xFF) as u8)
+}
+
 /// Cached prepared album-art protocol: rebuilt only when the track or the
 /// art-area dimensions change.
 pub struct CoverCache {
@@ -73,14 +84,8 @@ impl CoverRenderer {
         let cy = h / 2.0;
         let radius = (cx.min(cy) - 1.0).max(1.0);
 
-        // Derive color from title hash for unique aesthetic album color
-        let mut hash: u32 = 5381;
-        for b in title.bytes() {
-            hash = ((hash << 5).wrapping_add(hash)).wrapping_add(b as u32);
-        }
-        let hue_r = (hash & 0xFF) as u8;
-        let hue_g = ((hash >> 8) & 0xFF) as u8;
-        let hue_b = ((hash >> 16) & 0xFF) as u8;
+        // Unique aesthetic album color derived from the title hash.
+        let (hue_r, hue_g, hue_b) = title_hash_rgb(title);
 
         for row in 0..area.height {
             let y_pos = area.y + row;

@@ -1,3 +1,4 @@
+mod ambient;
 mod app;
 mod audio;
 mod cover;
@@ -10,6 +11,7 @@ mod scanner;
 mod settings;
 mod tag_editor;
 mod ui;
+mod viz;
 
 use std::env;
 use std::io::{self, stdout};
@@ -73,7 +75,16 @@ fn main() -> io::Result<()> {
     let font_size =
         query_font_size_via_ioctl().unwrap_or(ratatui_image::FontSize::new(10, 20));
     #[allow(deprecated)]
-    let picker = ratatui_image::picker::Picker::from_fontsize(font_size);
+    let mut picker = ratatui_image::picker::Picker::from_fontsize(font_size);
+    // Beyond half-blocks, `from_fontsize` only claims tmux/iTerm2 hints.
+    // Vendor env vars that reliably announce a graphics protocol upgrade the
+    // picker (kitty graphics / sixel), unlocking hi-res album art and the
+    // ambient backdrop — still without any stdio querying.
+    if !picker.tmux_detected() {
+        if let Some(protocol) = sniff_graphics_protocol(|key| env::var(key).ok()) {
+            picker.set_protocol_type(protocol);
+        }
+    }
 
     // Unsolicited terminal bytes (late conpty responses, typed-ahead input)
     // must not leak into the event loop: a leftover complete sequence shows
@@ -169,6 +180,95 @@ fn query_font_size_via_ioctl() -> Option<ratatui_image::FontSize> {
     ))
 }
 
+/// Conservative graphics-protocol detection from environment variables —
+/// complements `Picker::from_fontsize`, which only claims tmux/iTerm2
+/// hints. Only vendors whose env vars are reliably present are matched
+/// (no stdio querying — see the picker setup comments above). Pure over an
+/// injected getter for unit tests.
+fn sniff_graphics_protocol(
+    get: impl Fn(&str) -> Option<String>,
+) -> Option<ratatui_image::picker::ProtocolType> {
+    use ratatui_image::picker::ProtocolType;
+
+    let term = get("TERM").unwrap_or_default();
+    let term_program = get("TERM_PROGRAM").unwrap_or_default();
+
+    // kitty / ghostty: the kitty graphics protocol.
+    if get("KITTY_WINDOW_ID").is_some()
+        || get("KITTY_PID").is_some()
+        || term == "xterm-kitty"
+        || term == "xterm-ghostty"
+        || get("GHOSTTY_RESOURCES_DIR").is_some()
+    {
+        return Some(ProtocolType::Kitty);
+    }
+    // WezTerm: implements the kitty graphics protocol.
+    if term_program == "WezTerm" {
+        return Some(ProtocolType::Kitty);
+    }
+    // Konsole: sixel.
+    if get("KONSOLE_VERSION").is_some() {
+        return Some(ProtocolType::Sixel);
+    }
+    None
+}
+
+#[cfg(test)]
+mod sniffer_tests {
+    use super::*;
+
+    fn envmap<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        let map: std::collections::HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |key: &str| map.get(key).cloned()
+    }
+
+    #[test]
+    fn kitty_family_env_vars_unlock_kitty() {
+        for pairs in [
+            vec![("KITTY_WINDOW_ID", "1")],
+            vec![("KITTY_PID", "4242")],
+            vec![("TERM", "xterm-kitty")],
+            vec![("TERM", "xterm-ghostty")],
+            vec![("GHOSTTY_RESOURCES_DIR", "/usr/share/ghostty")],
+        ] {
+            assert_eq!(
+                sniff_graphics_protocol(envmap(&pairs)),
+                Some(ratatui_image::picker::ProtocolType::Kitty),
+                "{pairs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wezterm_unlocks_kitty_konsole_unlocks_sixel() {
+        assert_eq!(
+            sniff_graphics_protocol(envmap(&[("TERM_PROGRAM", "WezTerm")])),
+            Some(ratatui_image::picker::ProtocolType::Kitty)
+        );
+        assert_eq!(
+            sniff_graphics_protocol(envmap(&[("KONSOLE_VERSION", "230801")])),
+            Some(ratatui_image::picker::ProtocolType::Sixel)
+        );
+    }
+
+    #[test]
+    fn plain_terminals_fall_through_to_halfblocks() {
+        assert_eq!(sniff_graphics_protocol(envmap(&[])), None);
+        assert_eq!(
+            sniff_graphics_protocol(envmap(&[("TERM", "xterm-256color")])),
+            None
+        );
+        // TERM_PROGRAM alone does not unlock anything unknown.
+        assert_eq!(
+            sniff_graphics_protocol(envmap(&[("TERM_PROGRAM", "tmux")])),
+            None
+        );
+    }
+}
+
 fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
@@ -221,6 +321,9 @@ KEYBOARD SHORTCUTS:
     [e]                    Edit metadata tags of highlighted track
     [Ctrl+S]               Save edited metadata tags to audio file
     [a]                    Song menu (add to playlist, credits, favourite)
+    [b]                    Toggle the ambient album-art background (Now Playing);
+                           style, dimming & the cava spectrum visualizer live in
+                           the Settings tab (visualizer needs `cava` installed)
     [Shift+S]              Re-scan the music folder in the background
     [c]                    New playlist (from the Categories tab)
     [Esc]                  Back: close menus/dialogs; cancel a running scan

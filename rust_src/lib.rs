@@ -1,3 +1,4 @@
+pub mod ambient;
 pub mod app;
 pub mod audio;
 pub mod cover;
@@ -10,3 +11,4 @@ pub mod scanner;
 pub mod settings;
 pub mod tag_editor;
 pub mod ui;
+pub mod viz;

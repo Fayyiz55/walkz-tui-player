@@ -157,6 +157,35 @@ fn row_to_item(app: &App, row: &SettingsRow, is_selected: bool, width: u16) -> L
             "Accent color".to_string(),
             app.settings.accent.label().to_string(),
         ),
+        SettingsRow::AmbientEnabled => (
+            "Ambient background".to_string(),
+            if app.settings.ambient_enabled {
+                "On".to_string()
+            } else {
+                "Off".to_string()
+            },
+        ),
+        SettingsRow::AmbientStyle => (
+            "Ambient style".to_string(),
+            app.settings.ambient_style.label().to_string(),
+        ),
+        SettingsRow::AmbientDimming => (
+            "Background dimming".to_string(),
+            format!("{}%", app.settings.ambient_dimming),
+        ),
+        SettingsRow::Visualizer => {
+            let base = if app.settings.visualizer_enabled {
+                "On".to_string()
+            } else {
+                "Off".to_string()
+            };
+            let value = if app.viz_missing() {
+                format!("{base} · needs cava")
+            } else {
+                base
+            };
+            ("Spectrum visualizer (cava)".to_string(), value)
+        }
         SettingsRow::Hotkey(action) => (
             format!("Key · {}", action.label()),
             format!(
@@ -280,5 +309,24 @@ mod tests {
         app.rebinding = Some(crate::settings::HotkeyAction::NextTrack);
         let text = render_to_text(&app, 100, 40);
         assert!(text.contains("Press a new key for Next track"), "{text}");
+    }
+
+    #[test]
+    fn ambient_rows_render_with_values() {
+        let mut app = settings_app();
+        let text = render_to_text(&app, 100, 40);
+        assert!(text.contains("Ambient background"), "{text}");
+        assert!(text.contains("Ambient style"), "{text}");
+        assert!(text.contains("Album art (auto)"), "{text}");
+        assert!(text.contains("Background dimming"), "{text}");
+        assert!(text.contains("45%"), "{text}");
+        assert!(text.contains("Spectrum visualizer (cava)"), "{text}");
+        assert!(text.contains("Key · Toggle ambient background"), "{text}");
+        assert!(text.contains("[b]"), "{text}");
+
+        // Missing cava annotates the visualizer value.
+        app.viz_unavailable = true;
+        let text = render_to_text(&app, 100, 40);
+        assert!(text.contains("needs cava"), "{text}");
     }
 }
