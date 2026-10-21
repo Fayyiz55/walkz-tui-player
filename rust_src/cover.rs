@@ -50,9 +50,14 @@ impl CoverRenderer {
         if let Some(bytes) = app.cover_art_bytes(track) {
             if let Some(picker) = app.picker.as_ref() {
                 if let Ok(dyn_img) = image::load_from_memory(&bytes) {
-                    if let Ok(proto) =
-                        picker.new_protocol(dyn_img, Size::new(area.width, area.height), Resize::Fit(None))
-                    {
+                    if let Ok(proto) = picker.new_protocol(
+                        dyn_img,
+                        Size::new(area.width, area.height),
+                        // CatmullRom: antialiased resample — the default
+                        // Nearest filter drops pixel rows on every downscale
+                        // and makes covers look crunchy next to the original.
+                        Resize::Fit(Some(image::imageops::FilterType::CatmullRom)),
+                    ) {
                         *app.cover_cache.borrow_mut() = Some(CoverCache {
                             track_id,
                             art_dims,

@@ -115,7 +115,10 @@ pub fn render_ambient(f: &mut Frame, app: &crate::app::App, area: Rect) {
     }
 
     // Rebuild: pick a source (art → dominant → hue fallback), process the
-    // pixels once, prepare the stateful protocol for image terminals.
+    // pixels once, prepare the stateful protocol. Every protocol renders the
+    // image — graphic terminals at true pixel resolution, half-block
+    // terminals as soft cell mosaic (the blur hides the low resolution, the
+    // Walkman look works everywhere).
     let art_bytes = app
         .audio
         .current_track
@@ -129,15 +132,12 @@ pub fn render_ambient(f: &mut Frame, app: &crate::app::App, area: Rect) {
         dims,
         pixel_aspect,
         dimming,
-        graphics_capable(app),
     );
-    let state = if image.is_some() && graphics_capable(app) {
+    let state = image.as_ref().and_then(|img| {
         app.picker
             .as_ref()
-            .and_then(|p| image.as_ref().map(|img| p.new_resize_protocol(img.clone())))
-    } else {
-        None
-    };
+            .map(|p| p.new_resize_protocol(img.clone()))
+    });
 
     *app.ambient_cache.borrow_mut() = Some(AmbientCache {
         track_id,
@@ -166,17 +166,9 @@ fn backdrop_pixel_aspect(app: &crate::app::App, area: Rect) -> f32 {
     (area.width as f32 * fw as f32) / (area.height as f32 * fh as f32).max(1.0)
 }
 
-/// Whether the terminal's picker can emit actual images (a graphics
-/// protocol rather than the half-blocks fallback).
-fn graphics_capable(app: &crate::app::App) -> bool {
-    app.picker
-        .as_ref()
-        .map(|p| p.protocol_type() != ratatui_image::picker::ProtocolType::Halfblocks)
-        .unwrap_or(false)
-}
-
-/// Draw the cached backdrop: stateful image on graphics terminals, else the
-/// tint ramp (empty ramp → draw nothing, the historic flat background).
+/// Draw the cached backdrop: stateful image (any terminal protocol, incl.
+/// the half-blocks cell mosaic), else the tint ramp (empty ramp → draw
+/// nothing, the historic flat background).
 fn draw_cached(f: &mut Frame, app: &crate::app::App, area: Rect) {
     let mut cache = app.ambient_cache.borrow_mut();
     let Some(entry) = cache.as_mut() else {
@@ -184,7 +176,10 @@ fn draw_cached(f: &mut Frame, app: &crate::app::App, area: Rect) {
     };
     if let Some(state) = entry.state.as_mut() {
         let widget = ratatui_image::StatefulImage::<StatefulProtocol>::default()
-            .resize(Resize::Fit(None));
+            // Scale (not Fit): the processed backdrop is a deliberately small
+            // blurred thumb — Fit never upscales and would render a tiny
+            // rectangle; Scale blows it up to the full area for the bleed.
+            .resize(Resize::Scale(Some(image::imageops::FilterType::CatmullRom)));
         f.render_stateful_widget(widget, area, state);
         return;
     }
@@ -211,8 +206,9 @@ fn paint_ramp(buf: &mut ratatui::buffer::Buffer, area: Rect, ramp: &[(u8, u8, u8
 
 /// Decide the backdrop source and produce its pixels.
 ///
-/// Cascade: album art (image on graphics terminals, else dominant tint) →
-/// dominant tint → title-hue tint → flat (no track loaded).
+/// Cascade: album art (blurred image on every terminal — true pixels on
+/// graphic protocols, soft cell mosaic on half-blocks) → dominant-color
+/// tint → title-hue tint → flat (no track loaded).
 fn build_backdrop(
     title: Option<&str>,
     art_bytes: Option<&[u8]>,
@@ -220,7 +216,6 @@ fn build_backdrop(
     cells: (u16, u16),
     pixel_aspect: f32,
     dimming: u8,
-    graphics: bool,
 ) -> (BackdropSource, Option<DynamicImage>, Vec<(u8, u8, u8)>) {
     let rows = cells.1.max(1);
 
@@ -231,10 +226,8 @@ fn build_backdrop(
     };
 
     if let Some(bytes) = art_bytes {
-        // Album art style: full blurred image where the terminal can draw
-        // images; dominant-color tint otherwise (the Walkman look degrades
-        // gracefully on half-block-only terminals).
-        if style == AmbientStyle::AlbumArt && graphics {
+        // Album art style: the full blurred image, on every terminal.
+        if style == AmbientStyle::AlbumArt {
             if let Some(img) = prepare_backdrop_image(bytes, pixel_aspect, dimming) {
                 return (BackdropSource::BlurredArt, Some(img), Vec::new());
             }
@@ -273,7 +266,7 @@ pub fn prepare_backdrop_image(bytes: &[u8], pixel_aspect: f32, dimming: u8) -> O
     } else {
         (iw, ih)
     };
-    let thumb = image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle);
+    let thumb = image::imageops::resize(&img, nw, nh, image::imageops::FilterType::CatmullRom);
 
     // Center-crop to the terminal pixel aspect for a full-bleed fit.
     let cropped = crop_to_aspect(thumb, pixel_aspect);
@@ -526,40 +519,47 @@ mod tests {
     fn build_backdrop_cascades() {
         let art = solid_png(32, 32, [40, 120, 220, 255]);
 
-        // Album art + graphics → blurred image, no ramp.
+        // Album art style → blurred image (every terminal now renders it).
         let (src, img, ramp) =
-            build_backdrop(Some("T"), Some(&art), AmbientStyle::AlbumArt, (100, 40), 1.5, 45, true);
+            build_backdrop(Some("T"), Some(&art), AmbientStyle::AlbumArt, (100, 40), 1.5, 45);
         assert_eq!(src, BackdropSource::BlurredArt);
         assert!(img.is_some());
         assert!(ramp.is_empty());
 
-        // Album art + half-blocks terminal → dominant tint fallback.
+        // ColorTint style → dominant tint, never an image.
         let (src, img, ramp) =
-            build_backdrop(Some("T"), Some(&art), AmbientStyle::AlbumArt, (100, 40), 1.5, 45, false);
-        assert_eq!(src, BackdropSource::DominantColor);
-        assert!(img.is_none());
-        assert_eq!(ramp.len(), 40);
-
-        // ColorTint style → tint even on a graphics terminal.
-        let (src, img, ramp) =
-            build_backdrop(Some("T"), Some(&art), AmbientStyle::ColorTint, (100, 40), 1.5, 45, true);
+            build_backdrop(Some("T"), Some(&art), AmbientStyle::ColorTint, (100, 40), 1.5, 45);
         assert_eq!(src, BackdropSource::DominantColor);
         assert!(img.is_none());
         assert_eq!(ramp.len(), 40);
 
         // No art + title → hue tint.
         let (src, img, ramp) =
-            build_backdrop(Some("Neon Skyline"), None, AmbientStyle::AlbumArt, (100, 40), 1.5, 45, false);
+            build_backdrop(Some("Neon Skyline"), None, AmbientStyle::AlbumArt, (100, 40), 1.5, 45);
         assert_eq!(src, BackdropSource::TitleHue);
         assert!(img.is_none());
         assert_eq!(ramp.len(), 40);
 
         // Nothing playing → flat (empty ramp).
         let (src, img, ramp) =
-            build_backdrop(None, None, AmbientStyle::AlbumArt, (100, 40), 1.5, 45, false);
+            build_backdrop(None, None, AmbientStyle::AlbumArt, (100, 40), 1.5, 45);
         assert_eq!(src, BackdropSource::TitleHue);
         assert!(img.is_none());
         assert!(ramp.is_empty());
+
+        // Undecodable art bytes in AlbumArt style → dominant tint is
+        // skipped (decode fails twice) → hue fallback.
+        let (src, img, ramp) = build_backdrop(
+            Some("Fallback"),
+            Some(b"not-an-image"),
+            AmbientStyle::AlbumArt,
+            (100, 40),
+            1.5,
+            45,
+        );
+        assert_eq!(src, BackdropSource::TitleHue);
+        assert!(img.is_none());
+        assert_eq!(ramp.len(), 40);
     }
 
     #[test]
