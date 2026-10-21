@@ -312,6 +312,35 @@ impl App {
         self.settings.accent.color()
     }
 
+    /// Apply the Settings "image protocol" choice to the picker. `Auto`
+    /// re-runs the conservative env sniff (skipped under tmux); manual
+    /// choices always win — the user opted in knowingly. Clears the prepared
+    /// cover and ambient protocols so they rebuild with the new protocol
+    /// (called at startup from `main.rs` and when the row is adjusted).
+    pub fn apply_protocol_setting(&mut self) {
+        use crate::settings::ProtocolChoice;
+        let Some(picker) = self.picker.as_mut() else {
+            return;
+        };
+        let protocol = match self.settings.image_protocol {
+            ProtocolChoice::Auto => {
+                if picker.tmux_detected() {
+                    return;
+                }
+                match sniff_graphics_protocol(|key| std::env::var(key).ok()) {
+                    Some(p) => p,
+                    None => return,
+                }
+            }
+            ProtocolChoice::Kitty => ratatui_image::picker::ProtocolType::Kitty,
+            ProtocolChoice::Sixel => ratatui_image::picker::ProtocolType::Sixel,
+            ProtocolChoice::HalfBlocks => ratatui_image::picker::ProtocolType::Halfblocks,
+        };
+        picker.set_protocol_type(protocol);
+        self.cover_cache.borrow_mut().take();
+        self.invalidate_ambient();
+    }
+
     /// Cover-art bytes for one track, loaded on demand and cached until the
     /// track's file changes. Prefers bytes embedded on the track itself
     /// (tests / already-loaded payloads), falls back to reading the file's
@@ -1763,6 +1792,15 @@ impl App {
             Row::AmbientDimming => {
                 self.adjust_ambient_dimming(5);
             }
+            Row::Protocol => {
+                self.settings.image_protocol = self.settings.image_protocol.next();
+                self.save_settings();
+                self.apply_protocol_setting();
+                self.set_notification(format!(
+                    "🖥️ Image protocol: {}",
+                    self.settings.image_protocol.label()
+                ));
+            }
             Row::Visualizer => {
                 self.settings.visualizer_enabled = !self.settings.visualizer_enabled;
                 let state = if self.settings.visualizer_enabled { "On" } else { "Off" };
@@ -1829,7 +1867,7 @@ impl App {
                 self.set_notification(format!("🎨 Accent color: {}", self.settings.accent.label()));
             }
             // Booleans and cycled enums toggle/step on either direction.
-            Row::AmbientEnabled | Row::AmbientStyle | Row::Visualizer => {
+            Row::AmbientEnabled | Row::AmbientStyle | Row::Visualizer | Row::Protocol => {
                 self.settings_activate(row);
             }
             // Booleans toggle on either direction.
@@ -2005,6 +2043,46 @@ fn read_last_folder(path: &Path) -> Option<PathBuf> {
     } else {
         None
     }
+}
+
+/// Conservative graphics-protocol detection from environment variables —
+/// complements `Picker::from_fontsize`, which only claims tmux/iTerm2
+/// hints. Only vendors whose env vars are reliably present are matched
+/// (no stdio querying — see the picker setup comments in `main.rs`). Pure
+/// over an injected getter for unit tests.
+///
+/// Shared by the startup path (`main.rs`) and the Settings "image protocol"
+/// row (`App::apply_protocol_setting`, where `Auto` re-runs the sniff).
+pub fn sniff_graphics_protocol(
+    get: impl Fn(&str) -> Option<String>,
+) -> Option<ratatui_image::picker::ProtocolType> {
+    use ratatui_image::picker::ProtocolType;
+
+    let term = get("TERM").unwrap_or_default();
+    let term_program = get("TERM_PROGRAM").unwrap_or_default();
+
+    // kitty / ghostty: the kitty graphics protocol.
+    if get("KITTY_WINDOW_ID").is_some()
+        || get("KITTY_PID").is_some()
+        || term == "xterm-kitty"
+        || term == "xterm-ghostty"
+        || get("GHOSTTY_RESOURCES_DIR").is_some()
+    {
+        return Some(ProtocolType::Kitty);
+    }
+    // WezTerm: implements the kitty graphics protocol.
+    if term_program == "WezTerm" {
+        return Some(ProtocolType::Kitty);
+    }
+    // Windows Terminal (WSL sessions get WT_SESSION): 1.22+ renders sixel.
+    if get("WT_SESSION").is_some() {
+        return Some(ProtocolType::Sixel);
+    }
+    // Konsole: sixel.
+    if get("KONSOLE_VERSION").is_some() {
+        return Some(ProtocolType::Sixel);
+    }
+    None
 }
 
 #[cfg(test)]
@@ -3062,5 +3140,64 @@ mod tests {
 
         let _ = fs::remove_file(tmp_root("save-err-parent"));
         fs::remove_dir_all(tmp_root("save-err")).ok();
+    }
+
+    fn envmap<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        let map: std::collections::HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |key: &str| map.get(key).cloned()
+    }
+
+    #[test]
+    fn kitty_family_env_vars_unlock_kitty() {
+        for pairs in [
+            vec![("KITTY_WINDOW_ID", "1")],
+            vec![("KITTY_PID", "4242")],
+            vec![("TERM", "xterm-kitty")],
+            vec![("TERM", "xterm-ghostty")],
+            vec![("GHOSTTY_RESOURCES_DIR", "/usr/share/ghostty")],
+        ] {
+            assert_eq!(
+                crate::app::sniff_graphics_protocol(envmap(&pairs)),
+                Some(ratatui_image::picker::ProtocolType::Kitty),
+                "{pairs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wezterm_windows_terminal_konsole_mapping() {
+        assert_eq!(
+            crate::app::sniff_graphics_protocol(envmap(&[("TERM_PROGRAM", "WezTerm")])),
+            Some(ratatui_image::picker::ProtocolType::Kitty)
+        );
+        // WSL: WT_SESSION → Windows Terminal → sixel.
+        assert_eq!(
+            crate::app::sniff_graphics_protocol(envmap(&[
+                ("WT_SESSION", "a1b2c3"),
+                ("TERM", "xterm-256color"),
+            ])),
+            Some(ratatui_image::picker::ProtocolType::Sixel)
+        );
+        assert_eq!(
+            crate::app::sniff_graphics_protocol(envmap(&[("KONSOLE_VERSION", "230801")])),
+            Some(ratatui_image::picker::ProtocolType::Sixel)
+        );
+    }
+
+    #[test]
+    fn plain_terminals_fall_through_to_halfblocks() {
+        assert_eq!(crate::app::sniff_graphics_protocol(envmap(&[])), None);
+        assert_eq!(
+            crate::app::sniff_graphics_protocol(envmap(&[("TERM", "xterm-256color")])),
+            None
+        );
+        // TERM_PROGRAM alone does not unlock anything unknown.
+        assert_eq!(
+            crate::app::sniff_graphics_protocol(envmap(&[("TERM_PROGRAM", "tmux")])),
+            None
+        );
     }
 }

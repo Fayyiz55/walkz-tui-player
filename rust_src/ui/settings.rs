@@ -165,6 +165,10 @@ fn row_to_item(app: &App, row: &SettingsRow, is_selected: bool, width: u16) -> L
                 "Off".to_string()
             },
         ),
+        SettingsRow::Protocol => (
+            "Image protocol".to_string(),
+            app.settings.image_protocol.label().to_string(),
+        ),
         SettingsRow::AmbientStyle => (
             "Ambient style".to_string(),
             app.settings.ambient_style.label().to_string(),
@@ -319,7 +323,9 @@ mod tests {
         assert!(text.contains("Ambient style"), "{text}");
         assert!(text.contains("Album art (auto)"), "{text}");
         assert!(text.contains("Background dimming"), "{text}");
-        assert!(text.contains("45%"), "{text}");
+        assert!(text.contains("50%"), "{text}");
+        assert!(text.contains("Image protocol"), "{text}");
+        assert!(text.contains("Auto"), "{text}");
         assert!(text.contains("Spectrum visualizer (cava)"), "{text}");
         assert!(text.contains("Key · Toggle ambient background"), "{text}");
         assert!(text.contains("[b]"), "{text}");

@@ -131,6 +131,7 @@ pub enum SettingsRow {
     RememberState,
     ShowLyrics,
     ArtSize,
+    Protocol,
     AmbientEnabled,
     AmbientStyle,
     AmbientDimming,
@@ -150,6 +151,7 @@ pub fn settings_rows() -> Vec<SettingsRow> {
         SettingsRow::RememberState,
         SettingsRow::ShowLyrics,
         SettingsRow::ArtSize,
+        SettingsRow::Protocol,
         SettingsRow::AmbientEnabled,
         SettingsRow::AmbientStyle,
         SettingsRow::AmbientDimming,
@@ -214,10 +216,55 @@ impl AccentColor {
     }
 }
 
+/// Which image protocol the picker negotiates (Settings row). `Auto` uses
+/// the conservative env sniff; manual choices override it — power users and
+/// exotic setups (WSL hosts, SSH hops) can force the best mode themselves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ProtocolChoice {
+    /// Conservative env sniff (kitty / ghostty / WezTerm / Windows Terminal /
+    /// Konsole), skipped under tmux.
+    #[default]
+    Auto,
+    /// kitty graphics protocol (kitty, ghostty, WezTerm).
+    Kitty,
+    /// Sixel (Windows Terminal 1.22+, Konsole, WezTerm).
+    Sixel,
+    /// Colored half-block text cells — works on every terminal.
+    HalfBlocks,
+}
+
+#[allow(dead_code)]
+impl ProtocolChoice {
+    pub const ALL: [ProtocolChoice; 4] = [
+        ProtocolChoice::Auto,
+        ProtocolChoice::Kitty,
+        ProtocolChoice::Sixel,
+        ProtocolChoice::HalfBlocks,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ProtocolChoice::Auto => "Auto",
+            ProtocolChoice::Kitty => "Kitty",
+            ProtocolChoice::Sixel => "Sixel",
+            ProtocolChoice::HalfBlocks => "Half-blocks",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        let idx = Self::ALL.iter().position(|&a| a == self).unwrap_or(0);
+        Self::ALL[(idx + 1) % Self::ALL.len()]
+    }
+
+    pub fn prev(self) -> Self {
+        let idx = Self::ALL.iter().position(|&a| a == self).unwrap_or(0);
+        Self::ALL[(idx + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+}
+
 /// What feeds the Now Playing ambient backdrop (Settings tab).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum AmbientStyle {
-    /// Blurred, darkened album art rendered full-bleed where the terminal
+pub enum AmbientStyle {    /// Blurred, darkened album art rendered full-bleed where the terminal
     /// has a graphics protocol (Kitty / Sixel / iTerm2); a dominant-color
     /// tint ramp everywhere else. The Walkman look.
     #[default]
@@ -251,7 +298,7 @@ impl AmbientStyle {
 /// Ambient backdrop dimming: percent of brightness removed (25-75).
 pub const AMBIENT_DIMMING_MIN: u8 = 25;
 pub const AMBIENT_DIMMING_MAX: u8 = 75;
-const DEFAULT_AMBIENT_DIMMING: u8 = 45;
+const DEFAULT_AMBIENT_DIMMING: u8 = 50;
 
 fn default_ambient_dimming() -> u8 {
     DEFAULT_AMBIENT_DIMMING
@@ -290,6 +337,9 @@ pub struct Settings {
     pub show_lyrics_pane: bool,
     /// Album art sizing preset.
     pub art_size: ArtSize,
+    /// Image protocol for album art / ambient backdrop (Settings row).
+    #[serde(default)]
+    pub image_protocol: ProtocolChoice,
     /// Ambient album-art backdrop on Now Playing (`[b]` toggles).
     #[serde(default = "default_ambient_enabled")]
     pub ambient_enabled: bool,
@@ -326,6 +376,7 @@ impl Default for Settings {
             saved_shuffle: None,
             show_lyrics_pane: true,
             art_size: ArtSize::Medium,
+            image_protocol: ProtocolChoice::default(),
             ambient_enabled: default_ambient_enabled(),
             ambient_style: AmbientStyle::default(),
             ambient_dimming: default_ambient_dimming(),
@@ -550,7 +601,7 @@ mod tests {
         let s = Settings::default();
         assert!(s.ambient_enabled);
         assert_eq!(s.ambient_style, AmbientStyle::AlbumArt);
-        assert_eq!(s.ambient_dimming, 45);
+        assert_eq!(s.ambient_dimming, 50);
         assert!(s.visualizer_enabled);
         // Default hotkey for the ambient toggle.
         assert_eq!(default_hotkey(HotkeyAction::ToggleAmbient), 'b');
@@ -579,7 +630,7 @@ mod tests {
         assert_eq!(s.default_volume, 70);
         assert!(s.ambient_enabled);
         assert_eq!(s.ambient_style, AmbientStyle::AlbumArt);
-        assert_eq!(s.ambient_dimming, 45);
+        assert_eq!(s.ambient_dimming, 50);
         assert!(s.visualizer_enabled);
         std::fs::remove_dir_all(&dir).ok();
 
@@ -592,6 +643,45 @@ mod tests {
         s.visualizer_enabled = false;
         s.save_to(&dir);
         assert_eq!(Settings::load_from(&dir), s);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn protocol_choice_defaults_serde_and_ring() {
+        // Defaults.
+        let s = Settings::default();
+        assert_eq!(s.image_protocol, ProtocolChoice::Auto);
+
+        // Ring walks Auto → Kitty → Sixel → Half-blocks → Auto, both ways.
+        assert_eq!(ProtocolChoice::Auto.next(), ProtocolChoice::Kitty);
+        assert_eq!(ProtocolChoice::Kitty.next(), ProtocolChoice::Sixel);
+        assert_eq!(ProtocolChoice::Sixel.next(), ProtocolChoice::HalfBlocks);
+        assert_eq!(ProtocolChoice::HalfBlocks.next(), ProtocolChoice::Auto);
+        assert_eq!(ProtocolChoice::Auto.prev(), ProtocolChoice::HalfBlocks);
+        assert_eq!(ProtocolChoice::HalfBlocks.prev(), ProtocolChoice::Sixel);
+        assert_eq!(ProtocolChoice::Kitty.label(), "Kitty");
+        assert_eq!(ProtocolChoice::HalfBlocks.label(), "Half-blocks");
+
+        // Legacy file without the key → default Auto.
+        let dir = tmp_config("legacy-protocol");
+        let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("image_protocol");
+        std::fs::write(dir.join("settings.json"), legacy.to_string()).unwrap();
+        assert_eq!(
+            Settings::load_from(&dir).image_protocol,
+            ProtocolChoice::Auto
+        );
+        std::fs::remove_dir_all(&dir).ok();
+
+        // Roundtrip through disk.
+        let dir = tmp_config("protocol-roundtrip");
+        let mut s = Settings::default();
+        s.image_protocol = ProtocolChoice::Sixel;
+        s.save_to(&dir);
+        assert_eq!(Settings::load_from(&dir).image_protocol, ProtocolChoice::Sixel);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -609,10 +699,11 @@ mod tests {
     fn rows_include_ambient_group_after_art_size() {
         let rows = settings_rows();
         let art = rows.iter().position(|r| *r == SettingsRow::ArtSize).unwrap();
-        assert_eq!(rows[art + 1], SettingsRow::AmbientEnabled);
-        assert_eq!(rows[art + 2], SettingsRow::AmbientStyle);
-        assert_eq!(rows[art + 3], SettingsRow::AmbientDimming);
-        assert_eq!(rows[art + 4], SettingsRow::Visualizer);
-        assert_eq!(rows[art + 5], SettingsRow::VolumeStep);
+        assert_eq!(rows[art + 1], SettingsRow::Protocol);
+        assert_eq!(rows[art + 2], SettingsRow::AmbientEnabled);
+        assert_eq!(rows[art + 3], SettingsRow::AmbientStyle);
+        assert_eq!(rows[art + 4], SettingsRow::AmbientDimming);
+        assert_eq!(rows[art + 5], SettingsRow::Visualizer);
+        assert_eq!(rows[art + 6], SettingsRow::VolumeStep);
     }
 }
