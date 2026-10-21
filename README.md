@@ -27,7 +27,7 @@ Written in **100% Rust** with `ratatui` + `crossterm`. It plays your local music
 
 - **3-pane Now Playing** — hi-res album art (Kitty / Sixel / iTerm2 / half-blocks fallback, antialiased CatmullRom resampling so covers stay as sharp as the originals), tracklist, and auto-scrolling synced lyrics; panes reflow responsively — the lyrics pane hands its width back on narrow windows instead of clipping
 - **Ambient album-art background** — the Now Playing backdrop follows the playing song's cover, blurred and darkened like a Walkman ambience, on *every* terminal: full-bleed pixel image on Kitty / Sixel / iTerm2, a soft cell mosaic on half-block terminals; toggle with `[b]`, style & dimming in Settings
-- **cava spectrum visualizer** — optional live spectrum lane above the transport bar, powered by a `cava` subprocess tapping your system's default sink monitor (`sudo apt install cava`; ffplay playback stays untouched); toggle in Settings
+- **cava spectrum visualizer** — optional live spectrum lane above the transport bar, powered by a `cava` subprocess tapping your system's default sink monitor (`./install.sh` sets it up, or `sudo apt install cava`; ffplay playback stays untouched); toggle in Settings
 - **Categories** — metadata-driven sub-tabs: Album Artist (3-pane drill-down), Song, Artists, Album, and in-app Playlists
 - **Persistent playlists & favourites** — survive rescans and restarts
 - **Settings tab** — set your music folder path, launch cache, volume/seek steps, accent color, hotkey rebinding, ambient background style/dimming, the image protocol (Auto / Kitty / Sixel / Half-blocks — Auto sniffs kitty, ghostty, WezTerm, Windows Terminal, Konsole and iTerm2; WSL sessions resolve via `WT_SESSION`), and the spectrum visualizer; the folder and library are remembered, so your songs are ready on the next launch
@@ -38,13 +38,29 @@ Written in **100% Rust** with `ratatui` + `crossterm`. It plays your local music
 
 ## Installation
 
-### Prerequisites
+### Quick install (one command)
+
+```bash
+git clone https://github.com/Fayyiz55/walkz-tui-player.git
+cd walkz-tui-player
+./install.sh
+```
+
+That single script checks and installs **everything** — FFmpeg (playback), cava (spectrum visualizer) and the Rust toolchain if missing — through your package manager, builds the release binary and puts `walkz-tui` on your PATH (`~/.cargo/bin`). You'll type your sudo password once for the package installs. Preview what it would do first with `./install.sh --dry-run`.
+
+Once done, run `walkz-tui` from anywhere.
+
+### Manual install
+
+If you'd rather run each step yourself:
+
+**Prerequisites**
 
 - **Rust toolchain** — install via [rustup](https://rustup.rs)
 - **FFmpeg** — provides `ffplay`, used for audio playback (on Debian/Ubuntu: `sudo apt install ffmpeg`)
-- *(Optional)* **cava** — powers the spectrum visualizer (on Debian/Ubuntu: `sudo apt install cava`); without it everything else works and the visualizer row just shows "needs cava"
+- *(Optional)* **cava** — powers the spectrum visualizer (on Debian/Ubuntu: `sudo apt install cava`); without it everything else works and the visualizer row shows "needs cava (sudo apt install cava)"
 
-### 1. Build from source
+**1. Build from source**
 
 ```bash
 git clone https://github.com/Fayyiz55/walkz-tui-player.git
@@ -54,13 +70,13 @@ cargo build --release
 
 The compiled binary will be placed at `target/release/walkz-tui`.
 
-### 2. Run it
+**2. Run it**
 
 ```bash
 ./walkz-tui
 ```
 
-### 3. (Optional) Install on your PATH
+**3. (Optional) Install on your PATH**
 
 So `walkz-tui` works from anywhere:
 
