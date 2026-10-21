@@ -184,7 +184,7 @@ fn row_to_item(app: &App, row: &SettingsRow, is_selected: bool, width: u16) -> L
                 "Off".to_string()
             };
             let value = if app.viz_missing() {
-                format!("{base} · needs cava")
+                format!("{base} · needs cava (sudo apt install cava)")
             } else {
                 base
             };
@@ -330,9 +330,10 @@ mod tests {
         assert!(text.contains("Key · Toggle ambient background"), "{text}");
         assert!(text.contains("[b]"), "{text}");
 
-        // Missing cava annotates the visualizer value.
+        // Missing cava annotates the visualizer value with the exact fix.
         app.viz_unavailable = true;
         let text = render_to_text(&app, 100, 40);
         assert!(text.contains("needs cava"), "{text}");
+        assert!(text.contains("(sudo apt install cava)"), "{text}");
     }
 }
