@@ -21,11 +21,12 @@ pub enum HotkeyAction {
     SongMenu,
     OpenFolder,
     Rescan,
+    ToggleAmbient,
 }
 
 #[allow(dead_code)]
 impl HotkeyAction {
-    pub fn all() -> [Self; 10] {
+    pub fn all() -> [Self; 11] {
         [
             Self::NextTrack,
             Self::PrevTrack,
@@ -37,6 +38,7 @@ impl HotkeyAction {
             Self::SongMenu,
             Self::OpenFolder,
             Self::Rescan,
+            Self::ToggleAmbient,
         ]
     }
 
@@ -53,6 +55,7 @@ impl HotkeyAction {
             Self::SongMenu => "Song menu",
             Self::OpenFolder => "Open folder",
             Self::Rescan => "Rescan library",
+            Self::ToggleAmbient => "Toggle ambient background",
         }
     }
 }
@@ -70,6 +73,7 @@ pub fn default_hotkey(action: HotkeyAction) -> char {
         HotkeyAction::SongMenu => 'a',
         HotkeyAction::OpenFolder => 'o',
         HotkeyAction::Rescan => 'S',
+        HotkeyAction::ToggleAmbient => 'b',
     }
 }
 
@@ -127,6 +131,10 @@ pub enum SettingsRow {
     RememberState,
     ShowLyrics,
     ArtSize,
+    AmbientEnabled,
+    AmbientStyle,
+    AmbientDimming,
+    Visualizer,
     VolumeStep,
     SeekStep,
     Accent,
@@ -142,6 +150,10 @@ pub fn settings_rows() -> Vec<SettingsRow> {
         SettingsRow::RememberState,
         SettingsRow::ShowLyrics,
         SettingsRow::ArtSize,
+        SettingsRow::AmbientEnabled,
+        SettingsRow::AmbientStyle,
+        SettingsRow::AmbientDimming,
+        SettingsRow::Visualizer,
         SettingsRow::VolumeStep,
         SettingsRow::SeekStep,
         SettingsRow::Accent,
@@ -202,6 +214,57 @@ impl AccentColor {
     }
 }
 
+/// What feeds the Now Playing ambient backdrop (Settings tab).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum AmbientStyle {
+    /// Blurred, darkened album art rendered full-bleed where the terminal
+    /// has a graphics protocol (Kitty / Sixel / iTerm2); a dominant-color
+    /// tint ramp everywhere else. The Walkman look.
+    #[default]
+    AlbumArt,
+    /// Always the dominant-color tint ramp (never an image).
+    ColorTint,
+}
+
+#[allow(dead_code)]
+impl AmbientStyle {
+    pub const ALL: [AmbientStyle; 2] = [AmbientStyle::AlbumArt, AmbientStyle::ColorTint];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AmbientStyle::AlbumArt => "Album art (auto)",
+            AmbientStyle::ColorTint => "Color tint",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        let idx = Self::ALL.iter().position(|&a| a == self).unwrap_or(0);
+        Self::ALL[(idx + 1) % Self::ALL.len()]
+    }
+
+    pub fn prev(self) -> Self {
+        let idx = Self::ALL.iter().position(|&a| a == self).unwrap_or(0);
+        Self::ALL[(idx + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+}
+
+/// Ambient backdrop dimming: percent of brightness removed (25-75).
+pub const AMBIENT_DIMMING_MIN: u8 = 25;
+pub const AMBIENT_DIMMING_MAX: u8 = 75;
+const DEFAULT_AMBIENT_DIMMING: u8 = 45;
+
+fn default_ambient_dimming() -> u8 {
+    DEFAULT_AMBIENT_DIMMING
+}
+
+fn default_ambient_enabled() -> bool {
+    true
+}
+
+fn default_visualizer_enabled() -> bool {
+    true
+}
+
 fn default_volume_step() -> u8 {
     5
 }
@@ -227,6 +290,18 @@ pub struct Settings {
     pub show_lyrics_pane: bool,
     /// Album art sizing preset.
     pub art_size: ArtSize,
+    /// Ambient album-art backdrop on Now Playing (`[b]` toggles).
+    #[serde(default = "default_ambient_enabled")]
+    pub ambient_enabled: bool,
+    /// What feeds the backdrop: blurred art (tint fallback) or tint only.
+    #[serde(default)]
+    pub ambient_style: AmbientStyle,
+    /// Backdrop dimming percent of brightness removed (25-75).
+    #[serde(default = "default_ambient_dimming")]
+    pub ambient_dimming: u8,
+    /// cava spectrum lane above the transport bar (needs `cava` on PATH).
+    #[serde(default = "default_visualizer_enabled")]
+    pub visualizer_enabled: bool,
     /// Volume change per volume keypress (percent, 1-25).
     #[serde(default = "default_volume_step")]
     pub volume_step: u8,
@@ -251,6 +326,10 @@ impl Default for Settings {
             saved_shuffle: None,
             show_lyrics_pane: true,
             art_size: ArtSize::Medium,
+            ambient_enabled: default_ambient_enabled(),
+            ambient_style: AmbientStyle::default(),
+            ambient_dimming: default_ambient_dimming(),
+            visualizer_enabled: default_visualizer_enabled(),
             volume_step: default_volume_step(),
             seek_step_secs: default_seek_step_secs(),
             accent: AccentColor::default(),
@@ -464,5 +543,76 @@ mod tests {
         assert_eq!(hotkey_rows.len(), HotkeyAction::all().len());
         assert_eq!(rows.first(), Some(&SettingsRow::MusicFolder));
         assert_eq!(rows.get(1), Some(&SettingsRow::StartupCache));
+    }
+
+    #[test]
+    fn ambient_and_visualizer_defaults_and_serde() {
+        let s = Settings::default();
+        assert!(s.ambient_enabled);
+        assert_eq!(s.ambient_style, AmbientStyle::AlbumArt);
+        assert_eq!(s.ambient_dimming, 45);
+        assert!(s.visualizer_enabled);
+        // Default hotkey for the ambient toggle.
+        assert_eq!(default_hotkey(HotkeyAction::ToggleAmbient), 'b');
+        assert_eq!(s.hotkey_char(HotkeyAction::ToggleAmbient), 'b');
+
+        // Legacy settings.json without the ambient fields keeps loading:
+        // build one by stripping the new keys from today's shape (an older
+        // version's file exactly). Everything else must survive, and the
+        // four new fields must fill with their defaults.
+        let dir = tmp_config("legacy-ambient");
+        let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+        {
+            let obj = legacy.as_object_mut().unwrap();
+            for key in [
+                "ambient_enabled",
+                "ambient_style",
+                "ambient_dimming",
+                "visualizer_enabled",
+            ] {
+                obj.remove(key);
+            }
+            obj.insert("default_volume".to_string(), serde_json::json!(70));
+        }
+        std::fs::write(dir.join("settings.json"), legacy.to_string()).unwrap();
+        let s = Settings::load_from(&dir);
+        assert_eq!(s.default_volume, 70);
+        assert!(s.ambient_enabled);
+        assert_eq!(s.ambient_style, AmbientStyle::AlbumArt);
+        assert_eq!(s.ambient_dimming, 45);
+        assert!(s.visualizer_enabled);
+        std::fs::remove_dir_all(&dir).ok();
+
+        // Roundtrip through disk.
+        let dir = tmp_config("ambient-roundtrip");
+        let mut s = Settings::default();
+        s.ambient_enabled = false;
+        s.ambient_style = AmbientStyle::ColorTint;
+        s.ambient_dimming = 60;
+        s.visualizer_enabled = false;
+        s.save_to(&dir);
+        assert_eq!(Settings::load_from(&dir), s);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ambient_style_ring() {
+        assert_eq!(AmbientStyle::AlbumArt.next(), AmbientStyle::ColorTint);
+        assert_eq!(AmbientStyle::ColorTint.next(), AmbientStyle::AlbumArt);
+        assert_eq!(AmbientStyle::AlbumArt.prev(), AmbientStyle::ColorTint);
+        assert_eq!(AmbientStyle::ColorTint.prev(), AmbientStyle::AlbumArt);
+        assert_eq!(AmbientStyle::AlbumArt.label(), "Album art (auto)");
+        assert_eq!(AmbientStyle::ColorTint.label(), "Color tint");
+    }
+
+    #[test]
+    fn rows_include_ambient_group_after_art_size() {
+        let rows = settings_rows();
+        let art = rows.iter().position(|r| *r == SettingsRow::ArtSize).unwrap();
+        assert_eq!(rows[art + 1], SettingsRow::AmbientEnabled);
+        assert_eq!(rows[art + 2], SettingsRow::AmbientStyle);
+        assert_eq!(rows[art + 3], SettingsRow::AmbientDimming);
+        assert_eq!(rows[art + 4], SettingsRow::Visualizer);
+        assert_eq!(rows[art + 5], SettingsRow::VolumeStep);
     }
 }
