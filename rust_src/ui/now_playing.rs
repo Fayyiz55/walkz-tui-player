@@ -11,6 +11,11 @@ use crate::lyrics::LyricsProvider;
 use crate::models::Focus;
 use crate::settings::ArtSize;
 
+/// Below this many columns the Now Playing panes stack responsively: the
+/// lyrics pane auto-hides so art/info and the tracklist get the full width
+/// (PWA-like reflow — no clipped info on narrow windows).
+const NARROW_STACK_WIDTH: u16 = 100;
+
 pub fn render_now_playing(f: &mut Frame, app: &App, area: Rect) {
     // Ambient backdrop first: blurred album art / tint ramp underneath
     // every widget below (widgets draw over it; ratatui's patch semantics
@@ -35,10 +40,12 @@ pub fn render_now_playing(f: &mut Frame, app: &App, area: Rect) {
     let spectrum_area = main_chunks[1];
     let bottom_bar_area = main_chunks[2];
 
-    // Horizontal: Left column (50%) and Right column (50%). With the lyrics
-    // pane hidden in Settings the left column takes the full width, which
-    // also widens the album art.
-    let cols = if app.settings.show_lyrics_pane {
+    // Horizontal: Left column and Right column (50/50). The lyrics pane
+    // auto-hides on narrow windows (responsive stacking: art/info and the
+    // tracklist take the full width, nothing cramped), and stays hidden when
+    // disabled in Settings.
+    let show_lyrics = app.settings.show_lyrics_pane && panes_area.width >= NARROW_STACK_WIDTH;
+    let cols = if show_lyrics {
         Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
@@ -80,7 +87,7 @@ pub fn render_now_playing(f: &mut Frame, app: &App, area: Rect) {
     // Right column: synchronized lyrics, full height
     render_left_top_cover_and_info(f, app, left_top_area);
     render_left_bottom_tracklist(f, app, left_bottom_area);
-    if app.settings.show_lyrics_pane {
+    if show_lyrics {
         render_right_lyrics(f, app, cols[1]);
     }
 
@@ -256,13 +263,30 @@ fn render_left_bottom_tracklist(f: &mut Frame, app: &App, area: Rect) {
             let artist = track.artist_display();
             let dur = track.duration_formatted();
 
-            let line = Line::from(vec![
-                Span::styled(icon, if is_now_playing { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default() }),
+            // Responsive columns: fixed overhead (icon 2 + num 4 + gaps 2 +
+            // duration) leaves title/artist to split the rest; the artist
+            // column disappears entirely on very narrow panes.
+            let inner_w = inner.width as usize;
+            let overhead = 2 + 4 + 2 + dur.chars().count().max(5);
+            let remaining = inner_w.saturating_sub(overhead);
+            let artist_w = if remaining >= 30 { 18.min(remaining / 3) } else { 0 };
+            let title_w = remaining.saturating_sub(artist_w).max(8);
+
+            let mut spans = vec![
+                Span::styled(icon.to_string(), if is_now_playing { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default() }),
                 Span::styled(num, Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{:<26} ", truncate_str(title, 26)), if is_now_playing { Style::default().fg(app.accent()).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::White) }),
-                Span::styled(format!("{:<18} ", truncate_str(artist, 18)), Style::default().fg(Color::Gray)),
-                Span::styled(dur, Style::default().fg(Color::DarkGray)),
-            ]);
+                Span::styled(
+                    format!("{:<width$} ", truncate_str(title, title_w), width = title_w),
+                    if is_now_playing { Style::default().fg(app.accent()).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::White) },
+                ),
+            ];
+            if artist_w > 0 {
+                spans.push(Span::styled(
+                    format!("{:<width$} ", truncate_str(artist, artist_w), width = artist_w),
+                    Style::default().fg(Color::Gray),
+                ));
+            }
+            spans.push(Span::styled(dur, Style::default().fg(Color::DarkGray)));
 
             let item_style = if is_selected {
                 Style::default().bg(Color::Rgb(30, 45, 65)).fg(Color::White).add_modifier(Modifier::BOLD)
@@ -270,7 +294,7 @@ fn render_left_bottom_tracklist(f: &mut Frame, app: &App, area: Rect) {
                 Style::default()
             };
 
-            items.push(ListItem::new(line).style(item_style));
+            items.push(ListItem::new(Line::from(spans)).style(item_style));
         }
     }
 
@@ -337,45 +361,19 @@ fn render_left_top_cover_and_info(f: &mut Frame, app: &App, area: Rect) {
         let title_line = Line::from(vec![
             Span::styled("♪ ", Style::default().fg(app.accent()).add_modifier(Modifier::BOLD)),
             Span::styled(
-                &track.title,
+                truncate_str(&track.title, (info_area.width as usize).saturating_sub(2).max(4)),
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             ),
         ]);
 
-        let artist_album_line = Line::from(vec![
-            Span::styled(track.artist_display(), Style::default().fg(app.accent())),
-            Span::styled("  •  ", Style::default().fg(Color::DarkGray)),
-            Span::styled(track.album_display(), Style::default().fg(Color::Gray)),
-        ]);
+        let artist_album_line = build_artist_album_line(track, app, info_area.width as usize);
 
-        // Specs: Format │ Depth/Rate │ Bitrate │ Length │ Driver
-        let mut specs = vec![Span::styled(
-            format!("Format: {}", track.codec),
-            Style::default().fg(Color::Yellow),
-        )];
-        let depth_rate = track.depth_rate_str();
-        if !depth_rate.is_empty() {
-            specs.push(Span::styled("  │  ", Style::default().fg(Color::Rgb(50, 50, 60))));
-            specs.push(Span::styled(depth_rate, Style::default().fg(Color::Green)));
-        }
-        specs.push(Span::styled("  │  ", Style::default().fg(Color::Rgb(50, 50, 60))));
-        specs.push(Span::styled(
-            format!("{}", track.bitrate),
-            Style::default().fg(Color::Green),
-        ));
-        specs.push(Span::styled("  │  ", Style::default().fg(Color::Rgb(50, 50, 60))));
-        specs.push(Span::styled(
-            track.duration_formatted(),
-            Style::default().fg(app.accent()),
-        ));
-        specs.push(Span::styled("  │  ", Style::default().fg(Color::Rgb(50, 50, 60))));
-        specs.push(Span::styled(
-            &app.audio.output_driver,
-            Style::default().fg(Color::Magenta),
-        ));
-        let specs_line = Line::from(specs);
+        // Specs: width-tiered — Format │ Depth/Rate │ Bitrate │ Length │
+        // Driver, dropping pieces and compacting as the pane narrows so
+        // nothing is ever cut off mid-character.
+        let specs_line = build_specs_line(info_area.width as usize, track, app);
 
         let info_paragraph = Paragraph::new(vec![
             badge_line,
@@ -392,6 +390,140 @@ fn render_left_top_cover_and_info(f: &mut Frame, app: &App, area: Rect) {
             .alignment(Alignment::Center);
         f.render_widget(empty_msg, info_area);
     }
+}
+
+/// Width-tiered specs line, richest first — the first tier that fits the
+/// available columns wins (progressive disclosure, PWA-style):
+/// 1. `Format: ALAC │ 16-bit/44.1 kHz │ 1040 kbps │ 03:23 │ driver`
+/// 2. drops the driver, 3. drops the bitrate, 4. compact `ALAC · 44.1k/16b ·
+/// 03:23`, 5. bare `ALAC · 03:23`.
+fn build_specs_line(avail: usize, track: &crate::models::Track, app: &App) -> Line<'static> {
+    let sep_st = Style::default().fg(Color::Rgb(50, 50, 60));
+    let codec_st = Style::default().fg(Color::Yellow);
+    let depth_st = Style::default().fg(Color::Green);
+    let dur_st = Style::default().fg(app.accent());
+    let bitrate_st = Style::default().fg(Color::Green);
+    let driver_st = Style::default().fg(Color::Magenta);
+
+    let codec = track.codec.clone();
+    let depth_rate = track.depth_rate_str();
+    let dur = track.duration_formatted();
+    let driver = app.audio.output_driver.clone();
+
+    // (piece, style) pairs per tier; wide tiers use "  │  ", compact " · ".
+    let wide_sep = "  │  ";
+    let compact_sep = " · ";
+    let tiers: [(Vec<(String, Style)>, &str); 5] = [
+        (
+            vec![
+                (format!("Format: {codec}"), codec_st),
+                (depth_rate.clone(), depth_st),
+                (format!("{}", track.bitrate), bitrate_st),
+                (dur.clone(), dur_st),
+                (driver.clone(), driver_st),
+            ],
+            wide_sep,
+        ),
+        (
+            vec![
+                (format!("Format: {codec}"), codec_st),
+                (depth_rate.clone(), depth_st),
+                (format!("{}", track.bitrate), bitrate_st),
+                (dur.clone(), dur_st),
+            ],
+            wide_sep,
+        ),
+        (
+            vec![
+                (format!("Format: {codec}"), codec_st),
+                (depth_rate.clone(), depth_st),
+                (dur.clone(), dur_st),
+            ],
+            wide_sep,
+        ),
+        (
+            vec![
+                (codec.clone(), codec_st),
+                (compact_depth_rate(track), depth_st),
+                (dur.clone(), dur_st),
+            ],
+            compact_sep,
+        ),
+        (vec![(codec.clone(), codec_st), (dur.clone(), dur_st)], compact_sep),
+    ];
+
+    for (pieces, sep) in tiers {
+        // Empty pieces (unknown depth/rate, no metadata) drop out before the
+        // width math, so no dangling separator is left behind.
+        let pieces: Vec<(String, Style)> =
+            pieces.into_iter().filter(|(t, _)| !t.is_empty()).collect();
+        let total: usize = pieces.iter().map(|(s, _)| s.chars().count()).sum::<usize>()
+            + sep.chars().count() * pieces.len().saturating_sub(1);
+        if total <= avail {
+            let mut spans = Vec::with_capacity(pieces.len() * 2);
+            for (i, (text, style)) in pieces.into_iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::styled(sep.to_string(), sep_st));
+                }
+                spans.push(Span::styled(text, style));
+            }
+            return Line::from(spans);
+        }
+    }
+    // Absurdly narrow pane: bare codec + duration, clipped gracefully.
+    Line::from(vec![
+        Span::styled(codec, codec_st),
+        Span::styled(compact_sep.to_string(), sep_st),
+        Span::styled(dur, dur_st),
+    ])
+}
+
+/// "44.1k/16b"-style compact depth/rate for the narrow specs tier.
+fn compact_depth_rate(track: &crate::models::Track) -> String {
+    let rate = track.sample_rate_khz().map(|k| format!("{k}k"));
+    let depth = track.bit_depth.map(|d| format!("{d}b"));
+    match (depth, rate) {
+        (Some(d), Some(r)) => format!("{r}/{d}"),
+        (Some(d), None) => d,
+        (None, Some(r)) => r,
+        (None, None) => String::new(),
+    }
+}
+
+/// Artist • Album line that never clips: keeps the artist whole, ellipsizes
+/// the album first, then falls back to the artist alone.
+fn build_artist_album_line<'a>(
+    track: &'a crate::models::Track,
+    app: &'a App,
+    avail: usize,
+) -> Line<'a> {
+    let artist = track.artist_display();
+    let album = track.album_display();
+    let sep = "  •  ";
+
+    let artist_len = artist.chars().count();
+    let album_len = album.chars().count();
+    let sep_len = sep.chars().count();
+
+    if artist_len + sep_len + album_len <= avail {
+        return Line::from(vec![
+            Span::styled(artist.to_string(), Style::default().fg(app.accent())),
+            Span::styled(sep.to_string(), Style::default().fg(Color::DarkGray)),
+            Span::styled(album.to_string(), Style::default().fg(Color::Gray)),
+        ]);
+    }
+    if artist_len + sep_len + 2 <= avail {
+        let album_w = avail - artist_len - sep_len;
+        return Line::from(vec![
+            Span::styled(artist.to_string(), Style::default().fg(app.accent())),
+            Span::styled(sep.to_string(), Style::default().fg(Color::DarkGray)),
+            Span::styled(truncate_str(album, album_w), Style::default().fg(Color::Gray)),
+        ]);
+    }
+    Line::from(vec![Span::styled(
+        truncate_str(artist, avail.max(4)),
+        Style::default().fg(app.accent()),
+    )])
 }
 
 /// [Right]: Synchronized lyrics, full height
@@ -853,5 +985,126 @@ mod tests {
         on.settings.ambient_enabled = false;
         on.invalidate_ambient();
         assert_eq!(tinted_space_count(&on), baseline);
+    }
+
+    #[test]
+    fn ambient_blurred_art_backdrop_renders_on_halfblocks() {
+        // Cover art present + halfblocks picker: AlbumArt style now builds
+        // the blurred image on EVERY protocol — the half-blocks cell mosaic
+        // paints (fg+bg) nearly the whole Now Playing area, the Walkman
+        // look without a graphics protocol.
+        let mut png = Vec::new();
+        let img = image::RgbaImage::from_fn(24, 24, |x, _| {
+            image::Rgba([(x * 8) as u8, 40, 200, 255])
+        });
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+
+        let mut track = make_track("ALAC", Some(44100), Some(16));
+        track.cover_art = Some(png);
+        let mut app = app_with_track(track);
+        app.picker = Some(ratatui_image::picker::Picker::halfblocks());
+        assert!(app.settings.ambient_enabled);
+
+        let backend = ratatui::backend::TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render_now_playing(f, &app, f.area())).unwrap();
+        let painted = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .filter(|c| c.bg != Color::Reset)
+            .count();
+        assert!(painted > 2000, "backdrop-painted cells: {painted}/2400");
+    }
+
+    #[test]
+    fn specs_line_tiers_progressive_disclosure() {
+        let app = app_with_track(make_track("ALAC", Some(96000), Some(24)));
+        let track = app.audio.current_track.as_ref().unwrap();
+
+        let joined = |avail: usize| {
+            build_specs_line(avail, track, &app)
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        };
+
+        // Huge budget: full tier — Format, depth/rate, bitrate, length, driver.
+        let full = joined(400);
+        assert!(full.contains("Format: ALAC"), "{full}");
+        assert!(full.contains("24-bit/96 kHz"), "{full}");
+        assert!(full.contains("1873 kbps"), "{full}");
+        assert!(full.contains("03:20"), "{full}");
+
+        // Narrow budget: compact tier — no "Format:", slash-compact rate/depth.
+        let compact = joined(30);
+        assert!(compact.contains("ALAC · "), "{compact}");
+        assert!(compact.contains("96k/24b"), "{compact}");
+        assert!(compact.contains("03:20"), "{compact}");
+        assert!(!compact.contains("Format:"), "{compact}");
+        assert!(!compact.contains("1873 kbps"), "{compact}");
+
+        // Ultra-narrow budget: bare codec + length.
+        let bare = joined(12);
+        assert_eq!(bare, "ALAC · 03:20", "{bare}");
+
+        // Track with no depth/rate metadata: no dangling separator.
+        let lossy = app_with_track(make_track("MP3", None, None));
+        let track = lossy.audio.current_track.as_ref().unwrap();
+        let joined = build_specs_line(400, track, &lossy)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+        assert!(joined.contains("Format: MP3"), "{joined}");
+        assert!(!joined.contains(" ·  "), "{joined}");
+        assert!(!joined.contains("│  │"), "{joined}");
+    }
+
+    #[test]
+    fn lyrics_pane_auto_hides_below_narrow_threshold() {
+        let app = app_with_track(make_track("ALAC", Some(44100), Some(16)));
+        assert!(app.settings.show_lyrics_pane);
+
+        // Wide window: lyrics pane present.
+        let wide = render_to_text(&app, 120, 40);
+        assert!(wide.contains("Synchronized Lyrics"), "{wide}");
+
+        // Narrow window: auto-hidden even though the setting is still on.
+        let narrow = render_to_text(&app, 90, 40);
+        assert!(!narrow.contains("Synchronized Lyrics"), "{narrow}");
+    }
+
+    #[test]
+    fn tracklist_duration_survives_narrow_panes() {
+        let app = app_with_track(make_track("ALAC", Some(44100), Some(16)));
+        // 46-col window: the panes take the full width, inner ≈ 44 — the old
+        // fixed 26/18-col title/artist pushed the duration off the edge.
+        let backend = ratatui::backend::TestBackend::new(46, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render_now_playing(f, &app, f.area())).unwrap();
+        let buf = terminal.backend().buffer();
+        let row_strings: Vec<String> = (0..buf.area.height)
+            .map(|y| {
+                // Columns strictly inside the pane borders: the trailing
+                // border glyph after the duration must not fool ends_with.
+                (1..buf.area.width.saturating_sub(1))
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect();
+        let row = row_strings
+            .iter()
+            .find(|r| r.contains("01.") && r.contains("Neon"))
+            .expect("track row visible");
+        // The row ends exactly at the duration: nothing clipped.
+        assert!(
+            row.trim_end().ends_with("03:20"),
+            "duration clipped: {row:?}"
+        );
     }
 }

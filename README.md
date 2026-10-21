@@ -25,12 +25,12 @@ Written in **100% Rust** with `ratatui` + `crossterm`. It plays your local music
 
 ## Features
 
-- **3-pane Now Playing** — hi-res album art (Kitty / Sixel / iTerm2 / half-blocks fallback), tracklist, and auto-scrolling synced lyrics
-- **Ambient album-art background** — the Now Playing backdrop follows the playing song's cover, blurred and darkened like a Walkman ambience (full-bleed image on Kitty / Sixel / iTerm2; a dominant-color tint fallback on half-block terminals); toggle with `[b]`, style & dimming in Settings
+- **3-pane Now Playing** — hi-res album art (Kitty / Sixel / iTerm2 / half-blocks fallback, antialiased CatmullRom resampling so covers stay as sharp as the originals), tracklist, and auto-scrolling synced lyrics; panes reflow responsively — the lyrics pane hands its width back on narrow windows instead of clipping
+- **Ambient album-art background** — the Now Playing backdrop follows the playing song's cover, blurred and darkened like a Walkman ambience, on *every* terminal: full-bleed pixel image on Kitty / Sixel / iTerm2, a soft cell mosaic on half-block terminals; toggle with `[b]`, style & dimming in Settings
 - **cava spectrum visualizer** — optional live spectrum lane above the transport bar, powered by a `cava` subprocess tapping your system's default sink monitor (`sudo apt install cava`; ffplay playback stays untouched); toggle in Settings
 - **Categories** — metadata-driven sub-tabs: Album Artist (3-pane drill-down), Song, Artists, Album, and in-app Playlists
 - **Persistent playlists & favourites** — survive rescans and restarts
-- **Settings tab** — set your music folder path, launch cache, volume/seek steps, accent color, hotkey rebinding, ambient background style/dimming, and the spectrum visualizer; the folder and library are remembered, so your songs are ready on the next launch
+- **Settings tab** — set your music folder path, launch cache, volume/seek steps, accent color, hotkey rebinding, ambient background style/dimming, the image protocol (Auto / Kitty / Sixel / Half-blocks — Auto sniffs kitty, ghostty, WezTerm, Windows Terminal, Konsole and iTerm2; WSL sessions resolve via `WT_SESSION`), and the spectrum visualizer; the folder and library are remembered, so your songs are ready on the next launch
 - **Metadata tag editor** — edit Title / Artist / Album / Album Artist / Year / Genre / Track, saved to the file's native tags (ID3v2, MP4, Vorbis, FLAC)
 - **Quality badges** — `∿∿∿ Hi-Res Lossless` / `∿∿∿ Lossless` / `LOSSY` with real codec, bit depth, sample rate and bitrate
 - **Lightweight** — < 10 MB RAM, 0% idle CPU, zero UI jitter
