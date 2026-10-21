@@ -2,7 +2,7 @@
 
 A terminal music player I built for my own daily listening — fast, keyboard-driven, and easy on the eyes.
 
-Written in **100% Rust** with `ratatui` + `crossterm`, and inspired by terminal players like [Myx](https://github.com/AbineshDev01/Myx). It plays your local music with album art, synchronized lyrics, playlists and a tag editor — all inside the terminal.
+Written in **100% Rust** with `ratatui` + `crossterm`. It plays your local music with album art, synchronized lyrics, playlists and a tag editor — all inside the terminal.
 
 ```
 ♫ Walkz TUI Player v0.3.1   [1 Now Playing]   2 Categories   3 Queue   4 Metadata Editor   5 Audio Output    📁 Music │ 🔊 85%
