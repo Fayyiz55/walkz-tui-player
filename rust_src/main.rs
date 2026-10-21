@@ -48,7 +48,7 @@ fn main() -> io::Result<()> {
                 return Ok(());
             }
             "-v" | "--version" => {
-                println!("Walkz TUI Player v0.3.1 - Aesthetic Rust Terminal Music Player");
+                println!("Walkz TUI Player v0.3.5 - Aesthetic Rust Terminal Music Player");
                 return Ok(());
             }
             arg if !arg.starts_with('-') && folder.is_none() => {

@@ -5,7 +5,7 @@ A terminal music player I built for my own daily listening — fast, keyboard-dr
 Written in **100% Rust** with `ratatui` + `crossterm`. It plays your local music with album art, synchronized lyrics, playlists and a tag editor — all inside the terminal.
 
 ```
-♫ Walkz TUI Player v0.3.1   [1 Now Playing]   2 Categories   3 Queue   4 Metadata Editor   5 Audio Output    📁 Music │ 🔊 85%
+♫ Walkz TUI Player v0.3.5   [1 Now Playing]   2 Categories   3 Queue   4 Metadata Editor   5 Audio Output    📁 Music │ 🔊 85%
 ┌─── 💽 Album Art ──────────────────────────────┐┌─── 📜 Synchronized Lyrics ───────────────────────────────────┐
 │                                               ││                                                              │
 │              ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀                 ││         Driving through the glowing skyline                  │

@@ -1,6 +1,6 @@
 [package]
 name = "walkz-tui"
-version = "0.3.1"
+version = "0.3.5"
 edition = "2021"
 description = "Walkz TUI Player — Aesthetic Rust Terminal Music Player"
 default-run = "walkz-tui"
