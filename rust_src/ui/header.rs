@@ -18,7 +18,7 @@ pub fn render_header(f: &mut Frame, app: &App, area: Rect) {
 
     // 1. App Title
     let title_line = Line::from(vec![
-        Span::styled("♫ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled("♫ ", Style::default().fg(app.accent()).add_modifier(Modifier::BOLD)),
         Span::styled("Walkz TUI Player", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
     ]);
     f.render_widget(Paragraph::new(title_line), chunks[0]);
@@ -43,13 +43,13 @@ pub fn render_header(f: &mut Frame, app: &App, area: Rect) {
                 format!(" [{} {}] ", num, name),
                 Style::default()
                     .fg(Color::Black)
-                    .bg(Color::Cyan)
+                    .bg(app.accent())
                     .add_modifier(Modifier::BOLD),
             ));
         } else if tabbar_focused {
             tab_spans.push(Span::styled(
                 format!(" {}", num),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default().fg(app.accent()).add_modifier(Modifier::BOLD),
             ));
             tab_spans.push(Span::styled(
                 format!(" {}  ", name),
@@ -84,7 +84,7 @@ pub fn render_header(f: &mut Frame, app: &App, area: Rect) {
             format!("[{}] 📁 ", open_key),
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!("{} ", folder_name), Style::default().fg(Color::Cyan)),
+        Span::styled(format!("{} ", folder_name), Style::default().fg(app.accent())),
         Span::styled("│ ", Style::default().fg(Color::Rgb(50, 50, 60))),
         Span::styled(format!("{} {}% ", vol_icon, vol), Style::default().fg(Color::Yellow)),
         Span::styled("│ ", Style::default().fg(Color::Rgb(50, 50, 60))),

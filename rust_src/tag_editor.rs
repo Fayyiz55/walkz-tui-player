@@ -1,5 +1,6 @@
 use std::path::PathBuf;
-use id3::TagLike;
+use lofty::config::WriteOptions;
+use lofty::prelude::*;
 use crate::models::Track;
 
 #[allow(dead_code)]
@@ -142,22 +143,19 @@ impl TagEditorState {
         let year = self.fields[5].value.trim().parse::<i32>().ok();
         let genre = self.fields[6].value.trim().to_string();
 
-        // Write ID3 tag
-        let mut tag = id3::Tag::read_from_path(path).unwrap_or_else(|_| id3::Tag::new());
-        tag.set_title(&title);
-        tag.set_artist(&artist);
-        tag.set_album(&album);
-        tag.set_album_artist(&album_artist);
-        tag.set_genre(&genre);
-
-        if let Some(t_num) = track_number {
-            tag.set_track(t_num);
-        }
-        if let Some(y) = year {
-            tag.set_year(y);
-        }
-
-        match tag.write_to_path(path, id3::Version::Id3v24) {
+        // Write tags with lofty: the file keeps its native tag format
+        // (ID3v2 for mp3, MP4 `ilst` for m4a, Vorbis comments for flac/ogg),
+        // so edits on ALAC .m4a files are actually readable afterwards.
+        match write_tags_with_lofty(
+            path,
+            &title,
+            &artist,
+            &album,
+            &album_artist,
+            track_number,
+            year,
+            &genre,
+        ) {
             Ok(_) => {
                 let msg = format!("✓ Saved tags to {}", path.file_name().and_then(|f| f.to_str()).unwrap_or("file"));
                 self.status_message = Some((msg, true));
@@ -183,10 +181,66 @@ impl TagEditorState {
                 })
             }
             Err(e) => {
-                let err_msg = format!("Failed to write ID3 tags: {}", e);
+                let err_msg = format!("Failed to write tags: {}", e);
                 self.status_message = Some((err_msg.clone(), false));
                 Err(err_msg)
             }
         }
     }
+}
+
+/// Set `key` to `value`, removing the item when `value` is blank.
+fn set_or_remove(tag: &mut lofty::tag::Tag, key: ItemKey, value: &str) {
+    let value = value.trim();
+    if value.is_empty() {
+        tag.remove_key(key);
+    } else {
+        tag.insert_text(key, value.to_string());
+    }
+}
+
+/// Write the edited fields into the file's native tag format and save.
+fn write_tags_with_lofty(
+    path: &std::path::Path,
+    title: &str,
+    artist: &str,
+    album: &str,
+    album_artist: &str,
+    track_number: Option<u32>,
+    year: Option<i32>,
+    genre: &str,
+) -> Result<(), String> {
+    let mut tagged = lofty::read_from_path(path)
+        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+
+    // Edit the file's primary tag, creating it when the file has none.
+    let tag_type = tagged.primary_tag_type();
+    if tagged.tag_mut(tag_type).is_none() {
+        tagged.insert_tag(lofty::tag::Tag::new(tag_type));
+    }
+    let Some(tag) = tagged.tag_mut(tag_type) else {
+        return Err("This file format does not accept tags".to_string());
+    };
+
+    set_or_remove(tag, ItemKey::TrackTitle, title);
+    set_or_remove(tag, ItemKey::TrackArtist, artist);
+    set_or_remove(tag, ItemKey::AlbumTitle, album);
+    set_or_remove(tag, ItemKey::AlbumArtist, album_artist);
+    set_or_remove(tag, ItemKey::Genre, genre);
+    match track_number {
+        Some(n) => {
+            tag.insert_text(ItemKey::TrackNumber, n.to_string());
+        }
+        None => tag.remove_key(ItemKey::TrackNumber),
+    }
+    match year {
+        Some(y) => {
+            tag.insert_text(ItemKey::RecordingDate, y.to_string());
+        }
+        None => tag.remove_key(ItemKey::RecordingDate),
+    }
+
+    tagged
+        .save_to_path(path, WriteOptions::default())
+        .map_err(|e| format!("{}: {}", path.display(), e))
 }

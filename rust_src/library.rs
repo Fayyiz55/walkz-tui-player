@@ -1,9 +1,43 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use id3::TagLike;
+use lofty::prelude::*;
+use lofty::picture::PictureType;
 use crate::models::{CategoryType, Track};
 use crate::lyrics::LyricsProvider;
+
+/// Sort category items alphabetically, case-insensitively ("adele" before
+/// "Weeknd"). Ties keep byte order (stable sort over the map's order).
+pub(crate) fn sort_case_insensitive(items: &mut Vec<(String, usize)>) {
+    items.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+}
+
+/// Trimmed string when the underlying tag value has non-blank content.
+fn tag_text(value: Option<std::borrow::Cow<'_, str>>) -> Option<String> {
+    value
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// First run of 4 digits in a date-ish tag string ("2024-03-01" → 2024).
+fn year_from_tag_text(text: Option<&str>) -> Option<i32> {
+    let text = text?;
+    let digits: String = text.chars().filter(|c| c.is_ascii_digit()).take(4).collect();
+    if digits.len() == 4 {
+        digits.parse().ok()
+    } else {
+        None
+    }
+}
+
+/// Embedded lyrics text from any tag format: Vorbis/MP4 use `Lyrics`
+/// (`©lyr` atom, `LYRICS` comment), ID3v2 stores USLT as `UnsyncLyrics`.
+fn lyrics_text(tag: &lofty::tag::Tag) -> Option<String> {
+    tag.get_string(ItemKey::Lyrics)
+        .or_else(|| tag.get_string(ItemKey::UnsyncLyrics))
+        .map(str::to_string)
+        .filter(|t| !t.trim().is_empty())
+}
 
 pub struct Library {
     pub folder_path: Option<PathBuf>,
@@ -40,14 +74,16 @@ impl Library {
         self.ingest(tracks, m3us, folder);
     }
 
-    /// Rebuild all category indices from the current tracks
+    /// Rebuild all category indices from the current tracks.
+    ///
+    /// Artist/Album/Album-Artist maps are keyed by metadata display names;
+    /// the Playlist category is user-created only (see
+    /// [`Library::get_category_items`]), so no folder-derived or file-based
+    /// playlists are synthesized here.
     pub fn rebuild_indexes(&mut self) {
         self.artists.clear();
         self.albums.clear();
         self.album_artists.clear();
-
-        // If no custom playlists exist, group by subfolder as natural playlists
-        let mut folder_playlists: BTreeMap<String, Vec<usize>> = BTreeMap::new();
 
         for (idx, track) in self.tracks.iter().enumerate() {
             // Index by Artist
@@ -61,30 +97,11 @@ impl Library {
             // Index by Album Artist
             let album_artist = track.album_artist_display().to_string();
             self.album_artists.entry(album_artist).or_default().push(idx);
-
-            // Index by Subfolder as Playlist
-            if let Some(parent) = track.path.parent() {
-                if let Some(name) = parent.file_name().and_then(|s| s.to_str()) {
-                    folder_playlists.entry(format!("📁 {}", name)).or_default().push(idx);
-                }
-            }
         }
 
         // Sort album tracks by track number
         for indices in self.albums.values_mut() {
             indices.sort_by_key(|&idx| self.tracks[idx].track_number.unwrap_or(9999));
-        }
-
-        // Merge folder playlists if no .m3u exists or add "All Tracks"
-        if self.playlists.is_empty() {
-            let all_indices: Vec<usize> = (0..self.tracks.len()).collect();
-            self.playlists.insert("⭐ All Local Tracks".to_string(), all_indices);
-            for (name, indices) in folder_playlists {
-                self.playlists.insert(name, indices);
-            }
-        } else {
-            let all_indices: Vec<usize> = (0..self.tracks.len()).collect();
-            self.playlists.insert("⭐ All Local Tracks".to_string(), all_indices);
         }
     }
 
@@ -109,42 +126,31 @@ impl Library {
         let mut bit_depth = None;
         let mut channels = None;
 
-        // Try ID3 tag first (kept around: the lyrics loader reuses it instead
-        // of paying a second full file read, which matters on network/WSL
-        // mounts where every read is a round trip).
-        let tag = id3::Tag::read_from_path(path).ok();
-        if let Some(tag) = tag.as_ref() {
-            if let Some(t) = tag.title() {
-                if !t.trim().is_empty() {
-                    title = t.trim().to_string();
-                }
+        // Read tags via lofty: MP4/M4A (ALAC/AAC), ID3v2, FLAC, Vorbis,
+        // APE, WAV and AIFF are all covered — the old id3-only reader saw
+        // nothing in .m4a files and fell back to folder/file names.
+        let tagged = lofty::read_from_path(path).ok();
+        let tag = tagged.as_ref().and_then(|file| file.first_tag());
+        if let Some(tag) = tag {
+            if let Some(t) = tag_text(tag.title()) {
+                title = t;
             }
-            if let Some(a) = tag.artist() {
-                if !a.trim().is_empty() {
-                    artist = a.trim().to_string();
-                }
+            if let Some(a) = tag_text(tag.artist()) {
+                artist = a;
             }
-            if let Some(al) = tag.album() {
-                if !al.trim().is_empty() {
-                    album = al.trim().to_string();
-                }
+            if let Some(al) = tag_text(tag.album()) {
+                album = al;
             }
-            if let Some(aa) = tag.album_artist() {
-                if !aa.trim().is_empty() {
-                    album_artist = aa.trim().to_string();
-                }
+            if let Some(aa) = tag.get_string(ItemKey::AlbumArtist).map(str::trim).filter(|s| !s.is_empty()) {
+                album_artist = aa.to_string();
             }
-            if let Some(g) = tag.genre() {
-                if !g.trim().is_empty() {
-                    genre = g.trim().to_string();
-                }
+            if let Some(g) = tag_text(tag.genre()) {
+                genre = g;
             }
-            if let Some(y) = tag.year() {
-                year = Some(y);
-            }
-            if let Some(tr) = tag.track() {
-                track_number = Some(tr);
-            }
+            track_number = tag.track();
+            year = year_from_tag_text(tag.get_string(ItemKey::Year))
+                .or_else(|| year_from_tag_text(tag.get_string(ItemKey::RecordingDate)))
+                .or_else(|| tag.date().map(|ts| ts.year as i32));
         }
 
         // If artist or album still default, derive from subfolder structure: e.g. Artist/Album/01 Title.mp3
@@ -198,12 +204,13 @@ impl Library {
             album_artist = artist.clone();
         }
 
+        let embedded_lyrics = tag.and_then(lyrics_text);
         let lyrics = LyricsProvider::load_for_track_with_tag(
             path,
             &title,
             &artist,
             duration_secs,
-            tag.as_ref(),
+            embedded_lyrics.as_deref(),
         );
 
         // Real codec from the stream (ALAC inside M4A etc.), falling back to
@@ -247,13 +254,23 @@ impl Library {
     }
 
     /// Load the cover art for one track on demand: embedded tag picture
-    /// first, then a companion image file next to the track (`cover.jpg`,
-    /// `folder.png`, …). Called lazily from the UI (only the currently
-    /// displayed track needs its bytes in memory).
+    /// first (any format: ID3v2 APIC, MP4 `covr`, FLAC PICTURE, …), then a
+    /// companion image file next to the track (`cover.jpg`, `folder.png`,
+    /// …). Called lazily from the UI (only the currently displayed track
+    /// needs its bytes in memory).
     pub fn load_cover_art(path: &Path) -> Option<Vec<u8>> {
-        if let Ok(tag) = id3::Tag::read_from_path(path) {
-            if let Some(pic) = tag.pictures().next() {
-                return Some(pic.data.clone());
+        if let Ok(tagged) = lofty::read_from_path(path) {
+            if let Some(tag) = tagged.first_tag() {
+                // Prefer the front cover, then whatever picture exists.
+                let picture = tag
+                    .get_picture_type(PictureType::CoverFront)
+                    .or_else(|| tag.pictures().first());
+                if let Some(pic) = picture {
+                    let data = pic.data();
+                    if !data.is_empty() {
+                        return Some(data.to_vec());
+                    }
+                }
             }
         }
         path.parent().and_then(Self::find_companion_cover)
@@ -443,9 +460,13 @@ impl Library {
         self.rebuild_indexes();
     }
 
-    /// Get list of category names and track count for a given CategoryType
+    /// Get list of category names and track count for a given CategoryType.
+    ///
+    /// All listings are alphabetical (case-insensitive). The Playlist
+    /// category shows only playlists the user created in the app (`♪ …`)
+    /// plus Favourites (`♥ …`) — never folder structures or .m3u files.
     pub fn get_category_items(&self, cat: CategoryType) -> Vec<(String, usize)> {
-        match cat {
+        let mut items = match cat {
             CategoryType::Artist => self
                 .artists
                 .iter()
@@ -454,6 +475,7 @@ impl Library {
             CategoryType::Playlist => self
                 .playlists
                 .iter()
+                .filter(|(k, _)| k.starts_with("♪ ") || k.starts_with("♥ "))
                 .map(|(k, v)| (k.clone(), v.len()))
                 .collect(),
             CategoryType::Album => self
@@ -466,22 +488,99 @@ impl Library {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.len()))
                 .collect(),
-            // Every track title, in library order — the "flat songs" listing.
+            // Every track title, alphabetically — the "flat songs" listing.
             CategoryType::Song => self
-                .tracks
-                .iter()
-                .map(|t| (t.title.clone(), 1))
+                .song_order()
+                .into_iter()
+                .map(|idx| (self.tracks[idx].title.clone(), 1))
                 .collect(),
+        };
+        if cat != CategoryType::Song {
+            sort_case_insensitive(&mut items);
         }
+        items
     }
 
-    /// Get tracks for a given CategoryType and item name
+    /// Track indices ordered by title (case-insensitive), ties in library
+    /// order. Shared by the Song listing and its selection mapping so the
+    /// two always agree.
+    pub fn song_order(&self) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..self.tracks.len()).collect();
+        order.sort_by(|&a, &b| {
+            self.tracks[a]
+                .title
+                .to_lowercase()
+                .cmp(&self.tracks[b].title.to_lowercase())
+                .then(a.cmp(&b))
+        });
+        order
+    }
+
+    /// Albums (name, track count) of one album artist, alphabetically.
+    /// Grouped from that album artist's own tracks, so identically-named
+    /// albums under different album artists stay separate.
+    pub fn albums_of_album_artist(&self, album_artist: &str) -> Vec<(String, usize)> {
+        let Some(indices) = self.album_artists.get(album_artist) else {
+            return Vec::new();
+        };
+        let mut albums: BTreeMap<String, usize> = BTreeMap::new();
+        for &idx in indices {
+            let album = self.tracks[idx].album_display().to_string();
+            *albums.entry(album).or_insert(0) += 1;
+        }
+        let mut items: Vec<(String, usize)> = albums.into_iter().collect();
+        sort_case_insensitive(&mut items);
+        items
+    }
+
+    /// Tracks of one album as it appears under the given album artist, in
+    /// track-number order (ties and missing numbers fall back to title).
+    pub fn tracks_of_album_under_album_artist(&self, album_artist: &str, album: &str) -> Vec<usize> {
+        let Some(indices) = self.album_artists.get(album_artist) else {
+            return Vec::new();
+        };
+        let mut tracks: Vec<usize> = indices
+            .iter()
+            .filter(|&&idx| self.tracks[idx].album_display() == album)
+            .copied()
+            .collect();
+        tracks.sort_by(|&a, &b| {
+            self.tracks[a]
+                .track_number
+                .unwrap_or(9999)
+                .cmp(&self.tracks[b].track_number.unwrap_or(9999))
+                .then_with(|| {
+                    self.tracks[a]
+                        .title
+                        .to_lowercase()
+                        .cmp(&self.tracks[b].title.to_lowercase())
+                })
+        });
+        tracks
+    }
+
+    /// Get tracks for a given CategoryType and item name.
+    ///
+    /// Songs keep their listing's alphabetical order; an album's tracks
+    /// keep track-number order; a playlist keeps the user's custom order.
     pub fn get_tracks_for_category(&self, cat: CategoryType, name: &str) -> Vec<usize> {
         match cat {
-            CategoryType::Artist => self.artists.get(name).cloned().unwrap_or_default(),
+            CategoryType::Artist => {
+                let mut indices = self.artists.get(name).cloned().unwrap_or_default();
+                indices.sort_by(|&a, &b| {
+                    self.tracks[a]
+                        .title
+                        .to_lowercase()
+                        .cmp(&self.tracks[b].title.to_lowercase())
+                        .then(a.cmp(&b))
+                });
+                indices
+            }
             CategoryType::Playlist => self.playlists.get(name).cloned().unwrap_or_default(),
             CategoryType::Album => self.albums.get(name).cloned().unwrap_or_default(),
-            CategoryType::AlbumArtist => self.album_artists.get(name).cloned().unwrap_or_default(),
+            CategoryType::AlbumArtist => {
+                self.album_artists.get(name).cloned().unwrap_or_default()
+            }
             // Song titles can repeat across albums; all matching tracks join.
             CategoryType::Song => self
                 .tracks
@@ -547,13 +646,65 @@ mod tests {
         let album_tracks = &lib.albums["My Album"];
         assert_eq!(lib.tracks[album_tracks[0]].track_number, Some(1));
         assert_eq!(lib.tracks[album_tracks[1]].track_number, Some(2));
-        // m3u playlist resolved by path
+        // m3u playlist resolved by path internally…
         let mix = lib.playlists.get("my mix").expect("m3u playlist ingested");
         assert_eq!(mix.len(), 1);
-        assert_eq!(lib.tracks[mix[0]].id, "t1");
-        // all-tracks playlist exists
-        assert!(lib.playlists.keys().any(|k| k.contains("All Local")));
+        // …but the Playlist category only shows user-created playlists.
+        let shown = lib.get_category_items(CategoryType::Playlist);
+        assert!(shown.is_empty(), "no folder/m3u playlists are listed: {shown:?}");
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn song_listing_is_case_insensitive_alphabetical() {
+        let mut lib = Library::new();
+        lib.tracks = vec![
+            make_track("t1", PathBuf::from("/a"), "X", "AL", 1), // Title t1
+            make_track("t2", PathBuf::from("/b"), "X", "AL", 2),
+            make_track("t3", PathBuf::from("/c"), "X", "AL", 3),
+        ];
+        lib.tracks[0].title = "zebra road".into();
+        lib.tracks[1].title = "Apple Tree".into();
+        lib.tracks[2].title = "midnight sun".into();
+
+        let items = lib.get_category_items(CategoryType::Song);
+        let titles: Vec<&str> = items.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(titles, ["Apple Tree", "midnight sun", "zebra road"]);
+
+        // The selection mapping agrees with the listing order.
+        let order = lib.song_order();
+        assert_eq!(lib.tracks[order[0]].title, "Apple Tree");
+        assert_eq!(lib.tracks[order[2]].title, "zebra road");
+    }
+
+    #[test]
+    fn album_artist_drill_groups_own_albums() {
+        let mut lib = Library::new();
+        // Two tracks for AA "A" in album "Beta" and "Alpha"; one track for
+        // AA "B" in a same-named album "Beta" (name collision must not leak).
+        let mut t1 = make_track("t1", PathBuf::from("/a1"), "A", "Beta", 2);
+        let mut t2 = make_track("t2", PathBuf::from("/a2"), "A", "Beta", 1);
+        let t3 = make_track("t3", PathBuf::from("/a3"), "A", "Alpha", 1);
+        let mut t4 = make_track("t4", PathBuf::from("/b1"), "B", "Beta", 1);
+        t1.album_artist = "A".into();
+        t2.album_artist = "A".into();
+        t4.album_artist = "B".into();
+        lib.tracks = vec![t1, t2, t3, t4];
+        lib.rebuild_indexes();
+
+        let albums = lib.albums_of_album_artist("A");
+        assert_eq!(
+            albums,
+            vec![("Alpha".to_string(), 1), ("Beta".to_string(), 2)]
+        );
+
+        // Album tracks under AA "A" keep track-number order (t2 is #1).
+        let tracks = lib.tracks_of_album_under_album_artist("A", "Beta");
+        assert_eq!(tracks, vec![1, 0], "track #1 (t2) before track #2 (t1)");
+
+        // The same album name under AA "B" is isolated.
+        let b_tracks = lib.tracks_of_album_under_album_artist("B", "Beta");
+        assert_eq!(b_tracks, vec![3]);
     }
 }

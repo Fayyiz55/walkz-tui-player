@@ -121,25 +121,93 @@ impl ArtSize {
 /// One selectable row in the Settings tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsRow {
+    MusicFolder,
     StartupCache,
     DefaultVolume,
     RememberState,
     ShowLyrics,
     ArtSize,
+    VolumeStep,
+    SeekStep,
+    Accent,
     Hotkey(HotkeyAction),
 }
 
 /// The settings list, shared by the app logic and the renderer.
 pub fn settings_rows() -> Vec<SettingsRow> {
     let mut rows = vec![
+        SettingsRow::MusicFolder,
         SettingsRow::StartupCache,
         SettingsRow::DefaultVolume,
         SettingsRow::RememberState,
         SettingsRow::ShowLyrics,
         SettingsRow::ArtSize,
+        SettingsRow::VolumeStep,
+        SettingsRow::SeekStep,
+        SettingsRow::Accent,
     ];
     rows.extend(HotkeyAction::all().map(SettingsRow::Hotkey));
     rows
+}
+
+/// Accent color presets for the UI highlight color (Settings tab).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum AccentColor {
+    #[default]
+    Cyan,
+    Green,
+    Pink,
+    Amber,
+    Violet,
+}
+
+#[allow(dead_code)]
+impl AccentColor {
+    pub const ALL: [AccentColor; 5] = [
+        AccentColor::Cyan,
+        AccentColor::Green,
+        AccentColor::Pink,
+        AccentColor::Amber,
+        AccentColor::Violet,
+    ];
+
+    pub fn color(self) -> ratatui::style::Color {
+        match self {
+            AccentColor::Cyan => ratatui::style::Color::Cyan,
+            AccentColor::Green => ratatui::style::Color::Green,
+            AccentColor::Pink => ratatui::style::Color::Rgb(255, 120, 160),
+            AccentColor::Amber => ratatui::style::Color::Rgb(255, 180, 70),
+            AccentColor::Violet => ratatui::style::Color::Rgb(185, 130, 255),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AccentColor::Cyan => "Cyan",
+            AccentColor::Green => "Green",
+            AccentColor::Pink => "Pink",
+            AccentColor::Amber => "Amber",
+            AccentColor::Violet => "Violet",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        let idx = Self::ALL.iter().position(|&a| a == self).unwrap_or(0);
+        Self::ALL[(idx + 1) % Self::ALL.len()]
+    }
+
+    pub fn prev(self) -> Self {
+        let idx = Self::ALL.iter().position(|&a| a == self).unwrap_or(0);
+        Self::ALL[(idx + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+}
+
+fn default_volume_step() -> u8 {
+    5
+}
+
+fn default_seek_step_secs() -> u8 {
+    5
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -159,6 +227,15 @@ pub struct Settings {
     pub show_lyrics_pane: bool,
     /// Album art sizing preset.
     pub art_size: ArtSize,
+    /// Volume change per volume keypress (percent, 1-25).
+    #[serde(default = "default_volume_step")]
+    pub volume_step: u8,
+    /// Seek jump per ←/→ keypress (seconds, 1-60).
+    #[serde(default = "default_seek_step_secs")]
+    pub seek_step_secs: u8,
+    /// Accent color used for highlights, focus borders and the active tab.
+    #[serde(default)]
+    pub accent: AccentColor,
     /// Only rebindings are stored; the rest use `default_hotkey`.
     #[serde(default)]
     pub hotkeys: Vec<(HotkeyAction, char)>,
@@ -174,6 +251,9 @@ impl Default for Settings {
             saved_shuffle: None,
             show_lyrics_pane: true,
             art_size: ArtSize::Medium,
+            volume_step: default_volume_step(),
+            seek_step_secs: default_seek_step_secs(),
+            accent: AccentColor::default(),
             hotkeys: Vec::new(),
         }
     }
@@ -255,6 +335,9 @@ mod tests {
         assert!(!s.remember_repeat_shuffle);
         assert!(s.show_lyrics_pane);
         assert_eq!(s.art_size, ArtSize::Medium);
+        assert_eq!(s.volume_step, 5);
+        assert_eq!(s.seek_step_secs, 5);
+        assert_eq!(s.accent, AccentColor::Cyan);
         assert!(s.hotkeys.is_empty());
         // Defaults resolve to the historical keys.
         assert_eq!(s.hotkey_char(HotkeyAction::NextTrack), 'n');
@@ -275,6 +358,9 @@ mod tests {
         s.saved_shuffle = Some(true);
         s.show_lyrics_pane = false;
         s.art_size = ArtSize::Small;
+        s.volume_step = 10;
+        s.seek_step_secs = 15;
+        s.accent = AccentColor::Pink;
         s.set_hotkey(HotkeyAction::NextTrack, 'x');
         s.save_to(&dir);
 
@@ -283,6 +369,48 @@ mod tests {
         assert_eq!(loaded.hotkey_char(HotkeyAction::NextTrack), 'x');
         assert_eq!(loaded.hotkey_char(HotkeyAction::PrevTrack), 'p');
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn old_settings_file_without_new_fields_loads() {
+        // Settings written by an older build lack volume_step / seek_step /
+        // accent; serde defaults must fill them in instead of discarding
+        // the user's other choices.
+        let dir = tmp_config("legacy");
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{
+                "load_library_cache_on_launch": false,
+                "default_volume": 30,
+                "remember_repeat_shuffle": true,
+                "show_lyrics_pane": false,
+                "art_size": "Small"
+            }"#,
+        )
+        .unwrap();
+        let s = Settings::load_from(&dir);
+        assert!(!s.load_library_cache_on_launch);
+        assert_eq!(s.default_volume, 30);
+        assert!(s.remember_repeat_shuffle);
+        assert!(!s.show_lyrics_pane);
+        assert_eq!(s.art_size, ArtSize::Small);
+        assert_eq!(s.volume_step, 5);
+        assert_eq!(s.seek_step_secs, 5);
+        assert_eq!(s.accent, AccentColor::Cyan);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn accent_color_ring() {
+        assert_eq!(AccentColor::Cyan.next(), AccentColor::Green);
+        assert_eq!(AccentColor::Violet.next(), AccentColor::Cyan);
+        assert_eq!(AccentColor::Cyan.prev(), AccentColor::Violet);
+        assert_eq!(AccentColor::Cyan.color(), ratatui::style::Color::Cyan);
+        assert_eq!(AccentColor::Cyan.label(), "Cyan");
+        assert_eq!(AccentColor::Green.label(), "Green");
+        assert_eq!(AccentColor::Pink.label(), "Pink");
+        assert_eq!(AccentColor::Amber.label(), "Amber");
+        assert_eq!(AccentColor::Violet.label(), "Violet");
     }
 
     #[test]
@@ -334,6 +462,7 @@ mod tests {
             })
             .collect();
         assert_eq!(hotkey_rows.len(), HotkeyAction::all().len());
-        assert_eq!(rows.first(), Some(&SettingsRow::StartupCache));
+        assert_eq!(rows.first(), Some(&SettingsRow::MusicFolder));
+        assert_eq!(rows.get(1), Some(&SettingsRow::StartupCache));
     }
 }

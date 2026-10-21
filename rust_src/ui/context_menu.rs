@@ -19,11 +19,11 @@ fn modal_rect(screen: Rect, width: u16, height: u16) -> Rect {
     Rect { x, y, width: w, height: h }
 }
 
-fn menu_frame_block(title: &str) -> Block<'_> {
+fn menu_frame_block(title: &str, accent: ratatui::style::Color) -> Block<'_> {
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Double)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(Style::default().fg(accent))
         .title(title)
 }
 
@@ -48,7 +48,7 @@ pub fn render_song_menu(f: &mut Frame, app: &App) {
     let area = modal_rect(screen, 62, wanted_h);
     f.render_widget(Clear, area);
 
-    let block = menu_frame_block(" ♫ About This Song ");
+    let block = menu_frame_block(" ♫ About This Song ", app.accent());
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -166,7 +166,7 @@ fn render_menu_header(f: &mut Frame, app: &App, track: &crate::models::Track, ar
             Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
         ),
         Span::styled("  ·  ", Style::default().fg(Color::DarkGray)),
-        Span::styled(track.artist_display(), Style::default().fg(Color::Cyan)),
+        Span::styled(track.artist_display(), Style::default().fg(app.accent())),
         Span::styled("  ·  ", Style::default().fg(Color::DarkGray)),
         Span::styled(track.album_display(), Style::default().fg(Color::Gray)),
     ]);
@@ -185,7 +185,7 @@ pub fn render_create_playlist(f: &mut Frame, app: &App) {
     let area = modal_rect(screen, 62, 11);
     f.render_widget(Clear, area);
 
-    let block = menu_frame_block(" ＋ New Playlist ");
+    let block = menu_frame_block(" ＋ New Playlist ", app.accent());
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -217,7 +217,7 @@ pub fn render_create_playlist(f: &mut Frame, app: &App) {
     } else {
         Line::from(vec![
             Span::styled(&state.name_input, Style::default().fg(Color::White)),
-            Span::styled("█", Style::default().fg(Color::Cyan)),
+            Span::styled("█", Style::default().fg(app.accent())),
         ])
     };
     f.render_widget(Paragraph::new(name_disp), name_inner);
@@ -240,7 +240,7 @@ pub fn render_create_playlist(f: &mut Frame, app: &App) {
     } else {
         Line::from(vec![
             Span::styled(&state.desc_input, Style::default().fg(Color::White)),
-            Span::styled("█", Style::default().fg(Color::Cyan)),
+            Span::styled("█", Style::default().fg(app.accent())),
         ])
     };
     f.render_widget(Paragraph::new(desc_disp), desc_inner);
@@ -279,26 +279,26 @@ pub fn render_credits(f: &mut Frame, app: &App) {
     let area = modal_rect(screen, 70, 14);
     f.render_widget(Clear, area);
 
-    let block = menu_frame_block(" ⓘ Credits ");
+    let block = menu_frame_block(" ⓘ Credits ", app.accent());
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     let (badge, badge_color) = match track.quality_tier() {
         QualityTier::HiResLossless => (track.quality_tier().badge(), Color::Rgb(255, 215, 0)),
-        QualityTier::Lossless => (track.quality_tier().badge(), Color::Cyan),
+        QualityTier::Lossless => (track.quality_tier().badge(), app.accent()),
         QualityTier::Lossy => (track.quality_tier().badge(), Color::DarkGray),
     };
 
     let lines = vec![
         Line::from(vec![
-            Span::styled("♪ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled("♪ ", Style::default().fg(app.accent()).add_modifier(Modifier::BOLD)),
             Span::styled(
                 &track.title,
                 Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
-            Span::styled(track.artist_display(), Style::default().fg(Color::Cyan)),
+            Span::styled(track.artist_display(), Style::default().fg(app.accent())),
             Span::styled("  •  ", Style::default().fg(Color::DarkGray)),
             Span::styled(track.album_display(), Style::default().fg(Color::Gray)),
             if let Some(year) = track.year {
@@ -331,7 +331,7 @@ pub fn render_credits(f: &mut Frame, app: &App) {
             Span::styled("Genre: ", Style::default().fg(Color::DarkGray)),
             Span::styled(&track.genre, Style::default().fg(Color::Gray)),
             Span::styled("   Length: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(track.duration_formatted(), Style::default().fg(Color::Cyan)),
+            Span::styled(track.duration_formatted(), Style::default().fg(app.accent())),
             Span::styled("   Output: ", Style::default().fg(Color::DarkGray)),
             Span::styled(&app.audio.output_driver, Style::default().fg(Color::Magenta)),
         ]),

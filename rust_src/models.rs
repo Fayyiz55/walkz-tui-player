@@ -64,6 +64,9 @@ pub enum Focus {
     CategoryTabs,
     /// The category item list (left column).
     CategoryList,
+    /// The middle drill-down list (Album Artist tab: albums of the selected
+    /// album artist).
+    CategoryMid,
     /// The "Tracks in '<category>'" list (right column).
     CategoryTracks,
     // --- Queue ---
@@ -85,7 +88,8 @@ impl Focus {
             T::Categories => match self {
                 Self::TabBar => Self::CategoryTabs,
                 Self::CategoryTabs => Self::CategoryList,
-                Self::CategoryList => Self::CategoryTracks,
+                Self::CategoryList => Self::CategoryMid,
+                Self::CategoryMid => Self::CategoryTracks,
                 _ => Self::TabBar,
             },
             T::Queue => match self {
@@ -113,7 +117,8 @@ impl Focus {
                 Self::TabBar => Self::CategoryTracks,
                 Self::CategoryTabs => Self::TabBar,
                 Self::CategoryList => Self::CategoryTabs,
-                _ => Self::CategoryList,
+                Self::CategoryMid => Self::CategoryList,
+                _ => Self::CategoryMid,
             },
             T::Queue => match self {
                 Self::QueueList => Self::TabBar,
@@ -260,7 +265,7 @@ mod tests {
 
     #[test]
     fn categories_focus_ring() {
-        // Tab bar -> sub-tabs -> category list -> tracklist -> wrap.
+        // Tab bar -> sub-tabs -> category list -> mid list -> tracklist -> wrap.
         assert_eq!(Focus::TabBar.next_in_tab(AppTab::Categories), Focus::CategoryTabs);
         assert_eq!(
             Focus::CategoryTabs.next_in_tab(AppTab::Categories),
@@ -268,6 +273,10 @@ mod tests {
         );
         assert_eq!(
             Focus::CategoryList.next_in_tab(AppTab::Categories),
+            Focus::CategoryMid
+        );
+        assert_eq!(
+            Focus::CategoryMid.next_in_tab(AppTab::Categories),
             Focus::CategoryTracks
         );
         assert_eq!(
@@ -276,6 +285,10 @@ mod tests {
         );
         // And backwards.
         assert_eq!(Focus::TabBar.prev_in_tab(AppTab::Categories), Focus::CategoryTracks);
+        assert_eq!(
+            Focus::CategoryTracks.prev_in_tab(AppTab::Categories),
+            Focus::CategoryMid
+        );
         assert_eq!(
             Focus::CategoryList.prev_in_tab(AppTab::Categories),
             Focus::CategoryTabs

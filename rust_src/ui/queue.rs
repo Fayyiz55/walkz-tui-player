@@ -18,7 +18,7 @@ pub fn render_queue(f: &mut Frame, app: &App, area: Rect) {
             BorderType::Rounded
         })
         .border_style(Style::default().fg(if list_focused {
-            Color::Cyan
+            app.accent()
         } else {
             Color::DarkGray
         }))
@@ -42,7 +42,7 @@ pub fn render_queue(f: &mut Frame, app: &App, area: Rect) {
                 Span::styled("NOW PLAYING: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
                 Span::styled(&track.title, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
                 Span::styled(" by ", Style::default().fg(Color::DarkGray)),
-                Span::styled(track.artist_display(), Style::default().fg(Color::Cyan)),
+                Span::styled(track.artist_display(), Style::default().fg(app.accent())),
             ]),
             Line::from(vec![
                 Span::styled("Album: ", Style::default().fg(Color::DarkGray)),
@@ -80,7 +80,7 @@ pub fn render_queue(f: &mut Frame, app: &App, area: Rect) {
             let line = Line::from(vec![
                 Span::styled(if is_now { "▶ " } else { "  " }, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
                 Span::styled(format!("{:02}. ", pos + 1), Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{:<32} ", track.title), if is_now { Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::White) }),
+                Span::styled(format!("{:<32} ", track.title), if is_now { Style::default().fg(app.accent()).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::White) }),
                 Span::styled(format!("{:<20} ", track.artist_display()), Style::default().fg(Color::Gray)),
                 Span::styled(track.duration_formatted(), Style::default().fg(Color::DarkGray)),
             ]);

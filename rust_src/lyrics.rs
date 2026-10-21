@@ -10,15 +10,15 @@ impl LyricsProvider {
         Self::load_for_track_with_tag(track_path, title, artist, duration_secs, None)
     }
 
-    /// Same as [`load_for_track`], but reuses an already-parsed ID3 tag when
-    /// the caller has one (the scanner reads it for metadata anyway; a second
-    /// full read costs a round trip per track on network/WSL mounts).
+    /// Same as [`load_for_track`], but takes the embedded lyrics text the
+    /// scanner already extracted from the file's tags (a second full file
+    /// read would cost a round trip per track on network/WSL mounts).
     pub fn load_for_track_with_tag(
         track_path: &Path,
         title: &str,
         artist: &str,
         duration_secs: u64,
-        tag: Option<&id3::Tag>,
+        embedded: Option<&str>,
     ) -> Vec<LyricsLine> {
         // 1. Try sidecar .lrc file in the same directory:
         //    e.g., song.mp3 -> song.lrc
@@ -32,28 +32,12 @@ impl LyricsProvider {
             }
         }
 
-        // 2. Try ID3 USLT frame (embedded unsynchronized lyrics)
-        if let Some(tag) = tag {
-            for frame in tag.frames() {
-                if frame.id() == "USLT" {
-                    if let Some(content) = frame.content().text() {
-                        let parsed = Self::parse_lrc(content);
-                        if !parsed.is_empty() {
-                            return parsed;
-                        }
-                    }
-                }
-            }
-        } else if let Ok(tag) = id3::Tag::read_from_path(track_path) {
-            for frame in tag.frames() {
-                if frame.id() == "USLT" {
-                    if let Some(content) = frame.content().text() {
-                        let parsed = Self::parse_lrc(content);
-                        if !parsed.is_empty() {
-                            return parsed;
-                        }
-                    }
-                }
+        // 2. Try the embedded lyrics tag (USLT frame, `©lyr` atom, `LYRICS`
+        //    comment — the caller extracts it from whichever format applies)
+        if let Some(content) = embedded {
+            let parsed = Self::parse_lrc(content);
+            if !parsed.is_empty() {
+                return parsed;
             }
         }
 

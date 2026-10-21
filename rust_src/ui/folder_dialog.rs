@@ -29,7 +29,7 @@ pub fn render_folder_dialog(f: &mut Frame, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Double)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(Style::default().fg(app.accent()))
         .title(" 📁 Connect Music Folder ");
 
     let inner = block.inner(dialog_area);
@@ -67,12 +67,12 @@ pub fn render_folder_dialog(f: &mut Frame, app: &App) {
     let input_display = if app.folder_dialog_input.is_empty() {
         Line::from(vec![
             Span::styled("e.g. ~/Music or ./songs", Style::default().fg(Color::DarkGray)),
-            Span::styled("█", Style::default().fg(Color::Cyan)),
+            Span::styled("█", Style::default().fg(app.accent())),
         ])
     } else {
         Line::from(vec![
             Span::styled(&app.folder_dialog_input, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::styled("█", Style::default().fg(Color::Cyan)),
+            Span::styled("█", Style::default().fg(app.accent())),
         ])
     };
     f.render_widget(Paragraph::new(input_display), input_inner);

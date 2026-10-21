@@ -26,9 +26,10 @@ Written in **100% Rust** with `ratatui` + `crossterm`. It plays your local music
 ## Features
 
 - **3-pane Now Playing** — hi-res album art (Kitty / Sixel / iTerm2 / half-blocks fallback), tracklist, and auto-scrolling synced lyrics
-- **Categories** — your music folder auto-indexed into Artist / Album / Album Artist / Playlist (`.m3u` + folder-based)
+- **Categories** — metadata-driven sub-tabs: Album Artist (3-pane drill-down), Song, Artists, Album, and in-app Playlists
 - **Persistent playlists & favourites** — survive rescans and restarts
-- **Metadata tag editor** — edit Title / Artist / Album / Year / Genre, saved to the audio file as ID3v2.4
+- **Settings tab** — set your music folder path, launch cache, volume/seek steps, accent color, hotkey rebinding; the folder and library are remembered, so your songs are ready on the next launch
+- **Metadata tag editor** — edit Title / Artist / Album / Album Artist / Year / Genre / Track, saved to the file's native tags (ID3v2, MP4, Vorbis, FLAC)
 - **Quality badges** — `∿∿∿ Hi-Res Lossless` / `∿∿∿ Lossless` / `LOSSY` with real codec, bit depth, sample rate and bitrate
 - **Lightweight** — < 10 MB RAM, 0% idle CPU, zero UI jitter
 - **Universal audio output** — routes to your default soundcard via `ffplay` (PipeWire / PulseAudio / ALSA), works with speakers, Bluetooth or headphones
@@ -83,11 +84,11 @@ Press `[o]` inside the player to connect your music folder (e.g. `~/Music`) — 
 | Key | Action |
 |-----|--------|
 | `[o]` / `[f]` | Connect / change music folder |
-| `[1]` – `[5]` | Switch tabs (Now Playing, Categories, Queue, Metadata Editor, Audio Output) |
+| `[1]` – `[6]` | Switch tabs (Now Playing, Categories, Queue, Metadata Editor, Audio Output, Settings) |
 | `[Space]` | Play / Pause |
 | `[n]` / `[p]` | Next / previous track |
-| `[←]` / `[→]` | Seek ±5s |
-| `[+]` / `[-]` | Volume up / down |
+| `[←]` / `[→]` | Seek back / forward (step configurable, default 5s; inside Categories: switch sub-tab) |
+| `[+]` / `[-]` | Volume up / down (step configurable, default 5%) |
 | `[a]` | Song context menu (Add to Playlist / Credits / Favourite) |
 | `[e]` | Edit metadata tags · `[Ctrl+S]` saves to file |
 | `[q]` | Quit |

@@ -13,7 +13,7 @@ use crate::settings::{settings_rows, SettingsRow};
 pub fn render_settings(f: &mut Frame, app: &App, area: Rect) {
     let is_focused = app.focus == Focus::SettingsList;
     let border_style = if is_focused {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(app.accent())
     } else {
         Style::default().fg(Color::DarkGray)
     };
@@ -100,6 +100,19 @@ fn truncate(s: &str, max: usize) -> String {
 
 fn row_to_item(app: &App, row: &SettingsRow, is_selected: bool, width: u16) -> ListItem<'static> {
     let (label, value) = match row {
+        SettingsRow::MusicFolder => {
+            // Show the folder the app would use right now: the connected
+            // library folder, or the launch fallback when none is set yet.
+            let folder = app
+                .library
+                .folder_path
+                .clone()
+                .unwrap_or_else(App::fallback_music_dir);
+            (
+                "Music folder".to_string(),
+                truncate(&folder.display().to_string(), 42),
+            )
+        }
         SettingsRow::StartupCache => (
             "Load cache on launch".to_string(),
             if app.settings.load_library_cache_on_launch {
@@ -132,6 +145,18 @@ fn row_to_item(app: &App, row: &SettingsRow, is_selected: bool, width: u16) -> L
             "Album art size".to_string(),
             app.settings.art_size.label().to_string(),
         ),
+        SettingsRow::VolumeStep => (
+            "Volume step".to_string(),
+            format!("±{}%", app.settings.volume_step),
+        ),
+        SettingsRow::SeekStep => (
+            "Seek step".to_string(),
+            format!("±{}s", app.settings.seek_step_secs),
+        ),
+        SettingsRow::Accent => (
+            "Accent color".to_string(),
+            app.settings.accent.label().to_string(),
+        ),
         SettingsRow::Hotkey(action) => (
             format!("Key · {}", action.label()),
             format!(
@@ -156,7 +181,7 @@ fn row_to_item(app: &App, row: &SettingsRow, is_selected: bool, width: u16) -> L
         Style::default().fg(Color::Gray)
     };
     let value_style = if is_selected {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default().fg(app.accent()).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     };
@@ -180,6 +205,7 @@ mod tests {
     use super::*;
     use crate::app::App;
     use crate::models::{AppTab, Focus};
+    use crossterm::event::{KeyCode, KeyModifiers};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -216,6 +242,7 @@ mod tests {
         let app = settings_app();
         let text = render_to_text(&app, 100, 40);
         assert!(text.contains("⚙ Settings"), "{text}");
+        assert!(text.contains("Music folder"), "{text}");
         assert!(text.contains("Load cache on launch"), "{text}");
         assert!(text.contains("On"), "{text}");
         assert!(text.contains("Default volume (launch)"), "{text}");
@@ -228,6 +255,23 @@ mod tests {
         assert!(text.contains("[S]"), "{text}");
         assert!(text.contains("[Space]"), "{text}");
         assert!(text.contains("Enter] Toggle/Rebind"), "{text}");
+    }
+
+    #[test]
+    fn music_folder_row_shows_current_path() {
+        let mut app = settings_app();
+        app.library.folder_path = Some(std::path::PathBuf::from("/media/music"));
+        let text = render_to_text(&app, 100, 40);
+        assert!(text.contains("Music folder"), "{text}");
+        assert!(text.contains("/media/music"), "{text}");
+    }
+
+    #[test]
+    fn music_folder_row_opens_dialog_on_enter() {
+        let mut app = settings_app(); // already on Settings with the list focused
+        app.settings_selected = 0; // Music folder is the first row
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty());
+        assert!(app.is_folder_dialog_open);
     }
 
     #[test]

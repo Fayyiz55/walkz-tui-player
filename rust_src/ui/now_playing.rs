@@ -103,7 +103,7 @@ pub fn scroll_start(selected: usize, visible: usize) -> usize {
 fn render_left_bottom_tracklist(f: &mut Frame, app: &App, area: Rect) {
     let is_focused = app.focus == Focus::NowTracklist;
     let border_style = if is_focused {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(app.accent())
     } else {
         Style::default().fg(Color::DarkGray)
     };
@@ -162,7 +162,7 @@ fn render_left_bottom_tracklist(f: &mut Frame, app: &App, area: Rect) {
             let line = Line::from(vec![
                 Span::styled(icon, if is_now_playing { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default() }),
                 Span::styled(num, Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{:<26} ", truncate_str(title, 26)), if is_now_playing { Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::White) }),
+                Span::styled(format!("{:<26} ", truncate_str(title, 26)), if is_now_playing { Style::default().fg(app.accent()).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::White) }),
                 Span::styled(format!("{:<18} ", truncate_str(artist, 18)), Style::default().fg(Color::Gray)),
                 Span::styled(dur, Style::default().fg(Color::DarkGray)),
             ]);
@@ -229,7 +229,7 @@ fn render_left_top_cover_and_info(f: &mut Frame, app: &App, area: Rect) {
         let badge = track.quality_tier().badge();
         let badge_color = match track.quality_tier() {
             crate::models::QualityTier::HiResLossless => Color::Rgb(255, 215, 0),
-            crate::models::QualityTier::Lossless => Color::Cyan,
+            crate::models::QualityTier::Lossless => app.accent(),
             crate::models::QualityTier::Lossy => Color::DarkGray,
         };
         let badge_line = Line::from(Span::styled(
@@ -238,7 +238,7 @@ fn render_left_top_cover_and_info(f: &mut Frame, app: &App, area: Rect) {
         ));
 
         let title_line = Line::from(vec![
-            Span::styled("♪ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled("♪ ", Style::default().fg(app.accent()).add_modifier(Modifier::BOLD)),
             Span::styled(
                 &track.title,
                 Style::default()
@@ -248,7 +248,7 @@ fn render_left_top_cover_and_info(f: &mut Frame, app: &App, area: Rect) {
         ]);
 
         let artist_album_line = Line::from(vec![
-            Span::styled(track.artist_display(), Style::default().fg(Color::Cyan)),
+            Span::styled(track.artist_display(), Style::default().fg(app.accent())),
             Span::styled("  •  ", Style::default().fg(Color::DarkGray)),
             Span::styled(track.album_display(), Style::default().fg(Color::Gray)),
         ]);
@@ -271,7 +271,7 @@ fn render_left_top_cover_and_info(f: &mut Frame, app: &App, area: Rect) {
         specs.push(Span::styled("  │  ", Style::default().fg(Color::Rgb(50, 50, 60))));
         specs.push(Span::styled(
             track.duration_formatted(),
-            Style::default().fg(Color::Cyan),
+            Style::default().fg(app.accent()),
         ));
         specs.push(Span::styled("  │  ", Style::default().fg(Color::Rgb(50, 50, 60))));
         specs.push(Span::styled(
@@ -301,7 +301,7 @@ fn render_left_top_cover_and_info(f: &mut Frame, app: &App, area: Rect) {
 fn render_right_lyrics(f: &mut Frame, app: &App, area: Rect) {
     let is_focused = app.focus == Focus::NowLyrics;
     let border_style = if is_focused {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(app.accent())
     } else {
         Style::default().fg(Color::DarkGray)
     };
@@ -344,7 +344,7 @@ fn render_right_lyrics(f: &mut Frame, app: &App, area: Rect) {
             let is_active = i == active_idx;
             if is_active {
                 lines.push(Line::from(vec![
-                    Span::styled("▶ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::styled("▶ ", Style::default().fg(app.accent()).add_modifier(Modifier::BOLD)),
                     Span::styled(
                         &lyric.text,
                         Style::default()
@@ -412,8 +412,8 @@ fn render_bottom_controls_bar(f: &mut Frame, app: &App, area: Rect) {
     let unfilled_bar = "─".repeat(unfilled_len);
 
     let progress_line = Line::from(vec![
-        Span::styled(time_str_left, Style::default().fg(Color::Cyan)),
-        Span::styled(filled_bar, Style::default().fg(Color::Cyan)),
+        Span::styled(time_str_left, Style::default().fg(app.accent())),
+        Span::styled(filled_bar, Style::default().fg(app.accent())),
         Span::styled("●", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         Span::styled(unfilled_bar, Style::default().fg(Color::DarkGray)),
         Span::styled(time_str_right, Style::default().fg(Color::DarkGray)),

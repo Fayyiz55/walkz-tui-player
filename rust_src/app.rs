@@ -98,7 +98,9 @@ impl ScanState {
     }
 }
 
-const LIBRARY_CACHE_VERSION: u32 = 1;
+// v2: tags are parsed with lofty (m4a/ALAC metadata was invisible to the
+// old id3-only reader), so cached libraries must be re-scanned once.
+const LIBRARY_CACHE_VERSION: u32 = 2;
 
 /// Persisted snapshot of the last finished scan, so the next launch can
 /// restore the library instantly instead of re-walking the folder. Cover
@@ -123,6 +125,10 @@ pub struct App {
     pub focus: Focus,
     pub category_type: CategoryType,
     pub selected_category_idx: usize,
+    /// Drill-down list for the Album Artist tab: albums of the selected
+    /// album artist as (album name, track count).
+    pub category_mid_items: Vec<(String, usize)>,
+    pub selected_category_mid_idx: usize,
     pub selected_tracklist_idx: usize,
     pub active_category_name: String,
     pub active_playlist_tracks: Vec<usize>, // Track indices currently shown in the tracklist
@@ -207,6 +213,8 @@ impl App {
             focus: Focus::default_for_tab(AppTab::NowPlaying),
             category_type: CategoryType::AlbumArtist,
             selected_category_idx: 0,
+            category_mid_items: Vec::new(),
+            selected_category_mid_idx: 0,
             selected_tracklist_idx: 0,
             active_category_name: String::from("Loading…"),
             active_playlist_tracks: Vec::new(),
@@ -259,7 +267,7 @@ impl App {
         }
     }
 
-    fn fallback_music_dir() -> PathBuf {
+    pub fn fallback_music_dir() -> PathBuf {
         // Default to ~/Music if it exists, otherwise current working directory
         if let Ok(home) = std::env::var("HOME") {
             let music_dir = PathBuf::from(home).join("Music");
@@ -279,6 +287,12 @@ impl App {
 
     pub fn set_notification(&mut self, msg: impl Into<String>) {
         self.notification = Some((msg.into(), Instant::now()));
+    }
+
+    /// The user's accent color (Settings tab) used for highlights, focus
+    /// borders and the active tab chip.
+    pub fn accent(&self) -> ratatui::style::Color {
+        self.settings.accent.color()
     }
 
     /// Cover-art bytes for one track, loaded on demand and cached until the
@@ -317,10 +331,12 @@ impl App {
     // Library / category navigation
     // ------------------------------------------------------------------
 
-    /// Switch active category type (Artist, Playlist, Album, Album Artist)
+    /// Switch active category type (Album Artist, Song, Artists, Album,
+    /// Playlist) and reset the drill-down selection.
     pub fn set_category_type(&mut self, cat: CategoryType) {
         self.category_type = cat;
         self.selected_category_idx = 0;
+        self.selected_category_mid_idx = 0;
         self.refresh_active_category();
     }
 
@@ -354,8 +370,8 @@ impl App {
             H::NextTrack => self.play_next(),
             H::PrevTrack => self.play_prev(),
             H::PlayPause => self.audio.toggle_pause(),
-            H::VolumeUp => self.change_volume_setting(5),
-            H::VolumeDown => self.change_volume_setting(-5),
+            H::VolumeUp => self.change_volume_setting(self.settings.volume_step as i32),
+            H::VolumeDown => self.change_volume_setting(-(self.settings.volume_step as i32)),
             H::ToggleShuffle => {
                 self.audio.shuffle = !self.audio.shuffle;
                 self.set_notification(format!(
@@ -390,12 +406,41 @@ impl App {
         }
     }
 
-    /// Update tracks in the tracklist according to current category selection
+    /// Update tracks in the tracklist according to current category selection.
+    ///
+    /// Layouts per category type:
+    /// - Album Artist: three boxes — album artists → their albums → the
+    ///   selected album's tracks (track-number order).
+    /// - Song: one flat, alphabetically sorted song list; the right side is
+    ///   the highlighted song's info panel.
+    /// - Artists / Album / Playlist: item list → its tracks.
     pub fn refresh_active_category(&mut self) {
+        if self.category_type == CategoryType::Song {
+            // The highlighted row IS one track; the info panel reads it.
+            let order = self.library.song_order();
+            if order.is_empty() {
+                self.active_category_name = "Empty Category".to_string();
+                self.active_playlist_tracks.clear();
+                self.category_mid_items.clear();
+                self.selected_tracklist_idx = 0;
+                return;
+            }
+            if self.selected_category_idx >= order.len() {
+                self.selected_category_idx = order.len() - 1;
+            }
+            let track_idx = order[self.selected_category_idx];
+            self.active_category_name = self.library.tracks[track_idx].title.clone();
+            self.active_playlist_tracks = vec![track_idx];
+            self.selected_tracklist_idx = 0;
+            self.category_mid_items.clear();
+            return;
+        }
+
         let items = self.library.get_category_items(self.category_type);
         if items.is_empty() {
             self.active_category_name = "Empty Category".to_string();
             self.active_playlist_tracks.clear();
+            self.category_mid_items.clear();
             self.selected_tracklist_idx = 0;
             return;
         }
@@ -406,6 +451,29 @@ impl App {
 
         let (name, _) = &items[self.selected_category_idx];
         self.active_category_name = name.clone();
+
+        if self.category_type == CategoryType::AlbumArtist {
+            // Drill level 2: the albums of this album artist.
+            let albums = self.library.albums_of_album_artist(name);
+            if albums.is_empty() {
+                self.category_mid_items.clear();
+                self.active_playlist_tracks.clear();
+                self.selected_tracklist_idx = 0;
+                return;
+            }
+            if self.selected_category_mid_idx >= albums.len() {
+                self.selected_category_mid_idx = albums.len() - 1;
+            }
+            let album_name = albums[self.selected_category_mid_idx].0.clone();
+            self.category_mid_items = albums;
+            self.active_playlist_tracks = self
+                .library
+                .tracks_of_album_under_album_artist(name, &album_name);
+            self.selected_tracklist_idx = 0;
+            return;
+        }
+
+        self.category_mid_items.clear();
         self.active_playlist_tracks = self.library.get_tracks_for_category(self.category_type, name);
         self.selected_tracklist_idx = 0;
     }
@@ -415,6 +483,7 @@ impl App {
         let items = self.library.get_category_items(self.category_type);
         if !items.is_empty() && self.selected_category_idx + 1 < items.len() {
             self.selected_category_idx += 1;
+            self.selected_category_mid_idx = 0;
             self.refresh_active_category();
         }
     }
@@ -422,6 +491,24 @@ impl App {
     pub fn select_prev_category_item(&mut self) {
         if self.selected_category_idx > 0 {
             self.selected_category_idx -= 1;
+            self.selected_category_mid_idx = 0;
+            self.refresh_active_category();
+        }
+    }
+
+    /// Navigate the drill-down (middle) list: albums of an album artist.
+    pub fn select_next_category_mid(&mut self) {
+        if !self.category_mid_items.is_empty()
+            && self.selected_category_mid_idx + 1 < self.category_mid_items.len()
+        {
+            self.selected_category_mid_idx += 1;
+            self.refresh_active_category();
+        }
+    }
+
+    pub fn select_prev_category_mid(&mut self) {
+        if self.selected_category_mid_idx > 0 {
+            self.selected_category_mid_idx -= 1;
             self.refresh_active_category();
         }
     }
@@ -922,6 +1009,29 @@ impl App {
         }
     }
 
+    /// What the dialog pre-fills when opened: the connected library folder,
+    /// or an empty string when none is set. Used to detect "the input is
+    /// still the untouched prefill" so the first typed/pasted path replaces
+    /// it instead of appending to it.
+    fn folder_dialog_prefill(&self) -> String {
+        self.library
+            .folder_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+    }
+
+    /// Enter one typed character into the folder dialog. Typing over the
+    /// untouched prefill replaces it; once the input differs (or was
+    /// cleared with Ctrl+U) typing appends as usual.
+    fn folder_dialog_type_char(&mut self, c: char) {
+        let prefill = self.folder_dialog_prefill();
+        if !prefill.is_empty() && self.folder_dialog_input == prefill {
+            self.folder_dialog_input.clear();
+        }
+        self.folder_dialog_input.push(c);
+    }
+
     /// Close folder input dialog
     pub fn close_folder_dialog(&mut self) {
         self.is_folder_dialog_open = false;
@@ -1084,6 +1194,13 @@ impl App {
     pub fn paste_text(&mut self, text: &str) {
         let clean = text.replace(['\r', '\n'], "");
         if self.is_folder_dialog_open {
+            // Pasting a full path over the untouched prefill replaces it
+            // (same intent as typing a fresh path); after Ctrl+U or edits
+            // the paste appends.
+            let prefill = self.folder_dialog_prefill();
+            if !prefill.is_empty() && self.folder_dialog_input == prefill {
+                self.folder_dialog_input.clear();
+            }
             self.folder_dialog_input.push_str(&clean);
         } else if self.create_playlist.is_some() {
             for c in clean.chars() {
@@ -1140,7 +1257,7 @@ impl App {
                     return;
                 }
                 KeyCode::Char(c) => {
-                    self.folder_dialog_input.push(c);
+                    self.folder_dialog_type_char(c);
                     return;
                 }
                 _ => {}
@@ -1301,21 +1418,14 @@ impl App {
             }
             KeyCode::Tab => {
                 self.focus = self.focus.next_in_tab(self.active_tab);
-                // Skip the lyrics pane in the ring while it is hidden.
-                if self.active_tab == AppTab::NowPlaying
-                    && self.focus == Focus::NowLyrics
-                    && !self.settings.show_lyrics_pane
-                {
+                while !self.focus_reachable(self.focus) {
                     self.focus = self.focus.next_in_tab(self.active_tab);
                 }
                 return;
             }
             KeyCode::BackTab => {
                 self.focus = self.focus.prev_in_tab(self.active_tab);
-                if self.active_tab == AppTab::NowPlaying
-                    && self.focus == Focus::NowLyrics
-                    && !self.settings.show_lyrics_pane
-                {
+                while !self.focus_reachable(self.focus) {
                     self.focus = self.focus.prev_in_tab(self.active_tab);
                 }
                 return;
@@ -1323,41 +1433,23 @@ impl App {
             KeyCode::Char(c @ ('1' | '2' | '3' | '4' | '5' | '6'))
                 if (modifiers - crossterm::event::KeyModifiers::SHIFT).is_empty() =>
             {
-                // Digits act on whatever owns focus. On Categories the tab
-                // bar digits switch main tabs, the sub-tab digits switch the
-                // category type, and the panes ignore digits. Everywhere else
-                // digits switch main tabs directly.
-                if self.active_tab == AppTab::Categories {
-                    match self.focus {
-                        Focus::TabBar => self.switch_main_tab(c),
-                        Focus::CategoryTabs => {
-                            let target = match c {
-                                '1' => Some(CategoryType::AlbumArtist),
-                                '2' => Some(CategoryType::Song),
-                                '3' => Some(CategoryType::Artist),
-                                '4' => Some(CategoryType::Album),
-                                '5' => Some(CategoryType::Playlist),
-                                _ => None,
-                            };
-                            if let Some(cat) = target {
-                                self.set_category_type(cat);
-                            }
-                        }
-                        _ => {}
-                    }
-                } else {
-                    self.switch_main_tab(c);
-                }
+                // Digits always switch main tabs (1 Now Playing … 6
+                // Settings); the Categories sub-tab digits are display
+                // labels only and are switched with ←/→ instead.
+                self.switch_main_tab(c);
                 return;
             }
-            // Seek is global, except while the Settings list owns the
-            // arrows (Left/Right adjust the selected row there).
-            KeyCode::Left if !self.settings_owns_arrows() => {
-                self.audio.seek_relative(-5.0);
+            // Seek is global, except where a pane owns the arrows: the
+            // Settings list adjusts its rows, and the Categories tab uses
+            // ←/→ to switch category types.
+            KeyCode::Left if !self.settings_owns_arrows() && self.active_tab != AppTab::Categories => {
+                self.audio
+                    .seek_relative(-(self.settings.seek_step_secs as f64));
                 return;
             }
-            KeyCode::Right if !self.settings_owns_arrows() => {
-                self.audio.seek_relative(5.0);
+            KeyCode::Right if !self.settings_owns_arrows() && self.active_tab != AppTab::Categories => {
+                self.audio
+                    .seek_relative(self.settings.seek_step_secs as f64);
                 return;
             }
             // Rebindable actions (exact char match, case sensitive; SHIFT is
@@ -1372,14 +1464,30 @@ impl App {
                 // Permanent aliases: '=' / '_' are the unshifted forms of the
                 // '+' / '-' volume keys.
                 None if c == '=' => {
-                    self.change_volume_setting(5);
+                    self.change_volume_setting(self.settings.volume_step as i32);
                     return;
                 }
                 None if c == '_' => {
-                    self.change_volume_setting(-5);
+                    self.change_volume_setting(-(self.settings.volume_step as i32));
                     return;
                 }
-                None => {}
+                // Caps-Lock tolerance: an uppercase letter that no action is
+                // bound to falls back to its lowercase action, so `O` with
+                // Caps Lock on still opens the folder dialog. crossterm
+                // reports SHIFT for every uppercase char (Caps Lock or not),
+                // so the shift bit cannot distinguish them here — the
+                // fallback is safe because it only runs when the exact char
+                // has no binding (`S` = Rescan resolves in the Some arm
+                // above and is never shadowed).
+                None => {
+                    if c.is_ascii_uppercase() {
+                        if let Some(action) = self.settings.action_for_char(c.to_ascii_lowercase())
+                        {
+                            self.perform_hotkey_action(action);
+                            return;
+                        }
+                    }
+                }
             },
             _ => {}
         }
@@ -1400,28 +1508,30 @@ impl App {
             AppTab::Categories => match code {
                 KeyCode::Up | KeyCode::Char('k') => match self.focus {
                     Focus::CategoryList => self.select_prev_category_item(),
+                    Focus::CategoryMid => self.select_prev_category_mid(),
                     Focus::CategoryTracks => self.select_prev_track(),
                     _ => {}
                 },
                 KeyCode::Down | KeyCode::Char('j') => match self.focus {
                     Focus::CategoryList => self.select_next_category_item(),
+                    Focus::CategoryMid => self.select_next_category_mid(),
                     Focus::CategoryTracks => self.select_next_track(),
                     _ => {}
                 },
-                // Sub-tab cycling lives on the sub-tab row.
-                KeyCode::Left | KeyCode::Char('[') | KeyCode::Char('h')
-                    if self.focus == Focus::CategoryTabs =>
-                {
+                // ←/→ switch the category type from anywhere in the tab —
+                // not just while the strip owns focus (they no longer seek).
+                KeyCode::Left | KeyCode::Char('[') | KeyCode::Char('h') => {
                     self.prev_category_type()
                 }
-                KeyCode::Right | KeyCode::Char(']') | KeyCode::Char('l')
-                    if self.focus == Focus::CategoryTabs =>
-                {
+                KeyCode::Right | KeyCode::Char(']') | KeyCode::Char('l') => {
                     self.next_category_type()
                 }
                 KeyCode::Char('c')
                     if modifiers.is_empty()
-                        && matches!(self.focus, Focus::CategoryList | Focus::CategoryTabs) =>
+                        && matches!(
+                            self.focus,
+                            Focus::CategoryList | Focus::CategoryMid | Focus::CategoryTabs
+                        ) =>
                 {
                     self.open_create_playlist_standalone()
                 }
@@ -1429,7 +1539,14 @@ impl App {
                     // Walk focus back one level; from the tab bar, leave the
                     // tab (historical Esc behavior).
                     match self.focus {
-                        Focus::CategoryTracks => self.focus = Focus::CategoryList,
+                        Focus::CategoryTracks => {
+                            self.focus = if self.category_type == CategoryType::AlbumArtist {
+                                Focus::CategoryMid
+                            } else {
+                                Focus::CategoryList
+                            };
+                        }
+                        Focus::CategoryMid => self.focus = Focus::CategoryList,
                         Focus::CategoryList => self.focus = Focus::CategoryTabs,
                         Focus::CategoryTabs => self.focus = Focus::TabBar,
                         _ => {
@@ -1439,8 +1556,22 @@ impl App {
                     }
                 }
                 KeyCode::Enter => match self.focus {
-                    // Enter on the list jumps into its tracklist.
+                    // The Song tab has no track pane: Enter plays the
+                    // highlighted song in place (the info panel follows the
+                    // highlight).
+                    Focus::CategoryList if self.category_type == CategoryType::Song => {
+                        self.play_selected_track();
+                    }
+                    // Enter on the list opens the next level.
                     Focus::CategoryList => {
+                        self.selected_tracklist_idx = 0;
+                        self.focus = if self.category_type == CategoryType::AlbumArtist {
+                            Focus::CategoryMid
+                        } else {
+                            Focus::CategoryTracks
+                        };
+                    }
+                    Focus::CategoryMid => {
                         self.selected_tracklist_idx = 0;
                         self.focus = Focus::CategoryTracks;
                     }
@@ -1489,6 +1620,29 @@ impl App {
         self.active_tab == AppTab::Settings && self.focus == Focus::SettingsList
     }
 
+    /// Whether a focus target is actually rendered/reachable in the current
+    /// state. Used to skip dead stops while cycling focus with Tab:
+    /// - the lyrics pane is hidden while disabled in Settings;
+    /// - the Categories middle list exists only in the Album Artist tab;
+    /// - the Categories track list does not exist in the Song tab (its
+    ///   right side is the song info panel).
+    fn focus_reachable(&self, focus: Focus) -> bool {
+        if self.active_tab == AppTab::NowPlaying
+            && focus == Focus::NowLyrics
+            && !self.settings.show_lyrics_pane
+        {
+            return false;
+        }
+        if self.active_tab != AppTab::Categories {
+            return true;
+        }
+        match focus {
+            Focus::CategoryMid => self.category_type == CategoryType::AlbumArtist,
+            Focus::CategoryTracks => self.category_type != CategoryType::Song,
+            _ => true,
+        }
+    }
+
     fn handle_settings_key(&mut self, code: crossterm::event::KeyCode) {
         use crossterm::event::KeyCode;
         let rows = crate::settings::settings_rows();
@@ -1517,6 +1671,12 @@ impl App {
     fn settings_activate(&mut self, row: &crate::settings::SettingsRow) {
         use crate::settings::SettingsRow as Row;
         match row {
+            // Edit the music folder: the same modal used by the `o` hotkey,
+            // pre-filled with the current path. Submitting rescans, saves the
+            // folder to config.json and refreshes the launch cache.
+            Row::MusicFolder => {
+                self.open_folder_dialog();
+            }
             Row::StartupCache => {
                 self.settings.load_library_cache_on_launch =
                     !self.settings.load_library_cache_on_launch;
@@ -1560,6 +1720,20 @@ impl App {
                     self.settings.art_size.label()
                 ));
             }
+            Row::VolumeStep => {
+                self.adjust_volume_step(1);
+            }
+            Row::SeekStep => {
+                self.adjust_seek_step(1);
+            }
+            Row::Accent => {
+                self.settings.accent = self.settings.accent.next();
+                self.save_settings();
+                self.set_notification(format!(
+                    "🎨 Accent color: {}",
+                    self.settings.accent.label()
+                ));
+            }
             Row::DefaultVolume => {
                 // Enter has no toggle for a number; nudge up as a convenience.
                 self.change_default_volume(5);
@@ -1585,12 +1759,45 @@ impl App {
                 self.save_settings();
                 self.set_notification(format!("🖼 Album art size: {}", self.settings.art_size.label()));
             }
+            Row::VolumeStep => self.adjust_volume_step(dir),
+            Row::SeekStep => self.adjust_seek_step(dir),
+            Row::Accent => {
+                self.settings.accent = if dir >= 0 {
+                    self.settings.accent.next()
+                } else {
+                    self.settings.accent.prev()
+                };
+                self.save_settings();
+                self.set_notification(format!("🎨 Accent color: {}", self.settings.accent.label()));
+            }
             // Booleans toggle on either direction.
             Row::StartupCache | Row::RememberState | Row::ShowLyrics => {
                 self.settings_activate(row);
             }
-            Row::Hotkey(_) => {}
+            Row::MusicFolder | Row::Hotkey(_) => {}
         }
+    }
+
+    /// Adjust the volume step (1-25 %) from Settings.
+    fn adjust_volume_step(&mut self, delta: i32) {
+        let current = self.settings.volume_step as i32;
+        let next = (current + delta).clamp(1, 25) as u8;
+        if next != self.settings.volume_step {
+            self.settings.volume_step = next;
+            self.save_settings();
+        }
+        self.set_notification(format!("🔊 Volume step: ±{}%", next));
+    }
+
+    /// Adjust the seek step (1-60 s) from Settings.
+    fn adjust_seek_step(&mut self, delta: i32) {
+        let current = self.settings.seek_step_secs as i32;
+        let next = (current + delta).clamp(1, 60) as u8;
+        if next != self.settings.seek_step_secs {
+            self.settings.seek_step_secs = next;
+            self.save_settings();
+        }
+        self.set_notification(format!("⏩ Seek step: ±{}s", next));
     }
 
     /// Change the launch default volume from Settings (applies live too).
@@ -1707,52 +1914,39 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Category digit keys (Task 5 plan area 1)
+    // Digit keys (Task 5 plan area 1, revised: digits always switch tabs)
     // ------------------------------------------------------------------
 
     #[test]
-    fn category_subtab_digits_after_tab_focus() {
-        let mut app = make_app("subdigits");
+    fn digits_always_switch_main_tabs() {
+        let mut app = make_app("digits-tabs");
         // Route through the digit key so focus resets to the tab bar.
         app.handle_key(KeyCode::Char('2'), NONE);
         assert_eq!(app.active_tab, AppTab::Categories);
         assert_eq!(app.focus, Focus::TabBar);
 
-        // On the tab bar, digits switch MAIN tabs (1-6).
-        app.handle_key(KeyCode::Char('1'), NONE);
-        assert_eq!(app.active_tab, AppTab::NowPlaying);
-
-        // Back to Categories and focus the sub-tab row: digits 1-5 select
-        // the category type.
-        app.handle_key(KeyCode::Char('2'), NONE);
+        // Even with a Categories pane focused, digits switch MAIN tabs —
+        // the sub-tab strip is driven by ←/→ only.
         app.handle_key(KeyCode::Tab, NONE);
         assert_eq!(app.focus, Focus::CategoryTabs);
-
-        app.handle_key(KeyCode::Char('1'), NONE);
-        assert_eq!(app.category_type, CategoryType::AlbumArtist);
-        assert_eq!(app.active_tab, AppTab::Categories);
-
-        app.handle_key(KeyCode::Char('2'), NONE);
-        assert_eq!(app.category_type, CategoryType::Song);
-
         app.handle_key(KeyCode::Char('3'), NONE);
-        assert_eq!(app.category_type, CategoryType::Artist);
+        assert_eq!(app.active_tab, AppTab::Queue, "digit jumps out of Categories");
 
-        app.handle_key(KeyCode::Char('4'), NONE);
-        assert_eq!(app.category_type, CategoryType::Album);
-
+        // Same from the category list itself.
+        app.handle_key(KeyCode::Char('2'), NONE);
+        app.handle_key(KeyCode::Tab, NONE); // TabBar -> CategoryTabs
+        app.handle_key(KeyCode::Tab, NONE); // CategoryTabs -> CategoryList
+        assert_eq!(app.focus, Focus::CategoryList);
         app.handle_key(KeyCode::Char('5'), NONE);
-        assert_eq!(app.category_type, CategoryType::Playlist);
+        assert_eq!(app.active_tab, AppTab::AudioOutput);
 
-        fs::remove_dir_all(tmp_root("subdigits")).ok();
+        fs::remove_dir_all(tmp_root("digits-tabs")).ok();
     }
 
     #[test]
     fn digits_outside_categories_switch_tabs() {
-        let mut app = make_app("digits-tabs");
+        let mut app = make_app("digits-other");
 
-        // Note: inside Categories, 1–4 switch the category TYPE (the
-        // exception tested above), so navigate through the other tabs here.
         app.handle_key(KeyCode::Char('3'), NONE);
         assert_eq!(app.active_tab, AppTab::Queue);
         app.handle_key(KeyCode::Char('4'), NONE);
@@ -1764,7 +1958,191 @@ mod tests {
         app.handle_key(KeyCode::Char('2'), NONE);
         assert_eq!(app.active_tab, AppTab::Categories);
 
-        fs::remove_dir_all(tmp_root("digits-tabs")).ok();
+        fs::remove_dir_all(tmp_root("digits-other")).ok();
+    }
+
+    // ------------------------------------------------------------------
+    // Categories arrows and focus skipping
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn arrows_switch_category_type_from_anywhere_in_categories() {
+        let mut app = make_app("cat-arrows");
+        app.scan_state = None;
+        app.apply_scan_results_at(tmp_root("cat-arrows"), two_track_payload());
+
+        app.handle_key(KeyCode::Char('2'), NONE); // Categories, TabBar focus
+        assert_eq!(app.category_type, CategoryType::AlbumArtist);
+
+        // ←/→ switch the sub-tab even while a list pane owns focus.
+        app.handle_key(KeyCode::Tab, NONE);
+        app.handle_key(KeyCode::Tab, NONE);
+        assert_eq!(app.focus, Focus::CategoryList);
+        app.handle_key(KeyCode::Right, NONE);
+        assert_eq!(app.category_type, CategoryType::Song);
+        app.handle_key(KeyCode::Right, NONE);
+        assert_eq!(app.category_type, CategoryType::Artist);
+        app.handle_key(KeyCode::Left, NONE);
+        assert_eq!(app.category_type, CategoryType::Song);
+        app.handle_key(KeyCode::Left, NONE);
+        assert_eq!(app.category_type, CategoryType::AlbumArtist);
+
+        fs::remove_dir_all(tmp_root("cat-arrows")).ok();
+    }
+
+    #[test]
+    fn arrows_seek_outside_categories() {
+        let mut app = make_app("seek-arrows");
+        app.scan_state = None;
+        app.apply_scan_results_at(tmp_root("seek-arrows"), two_track_payload());
+
+        app.handle_key(KeyCode::Right, NONE); // Now Playing: seek, not tabs
+        assert_eq!(app.active_tab, AppTab::NowPlaying);
+        // (seek itself is a no-op with nothing playing; tab must not change)
+
+        fs::remove_dir_all(tmp_root("seek-arrows")).ok();
+    }
+
+    #[test]
+    fn tab_focus_skips_dead_category_panes() {
+        let mut app = make_app("focus-skip");
+        app.scan_state = None;
+        app.apply_scan_results_at(tmp_root("focus-skip"), two_track_payload());
+        app.handle_key(KeyCode::Char('2'), NONE);
+
+        // In the Album Artist tab the full ring is reachable.
+        app.handle_key(KeyCode::Tab, NONE); // TabBar -> CategoryTabs
+        app.handle_key(KeyCode::Tab, NONE); // -> CategoryList
+        app.handle_key(KeyCode::Tab, NONE); // -> CategoryMid
+        assert_eq!(app.focus, Focus::CategoryMid);
+        app.handle_key(KeyCode::Tab, NONE); // -> CategoryTracks
+        app.handle_key(KeyCode::Tab, NONE); // -> TabBar
+        assert_eq!(app.focus, Focus::TabBar);
+
+        // In the Song tab there is no track pane: Mid and Tracks are
+        // skipped, so Tab cycles TabBar -> Tabs -> List -> TabBar.
+        app.handle_key(KeyCode::Right, NONE); // AlbumArtist -> Song
+        assert_eq!(app.category_type, CategoryType::Song);
+        app.handle_key(KeyCode::Tab, NONE); // TabBar -> CategoryTabs
+        app.handle_key(KeyCode::Tab, NONE); // -> CategoryList
+        assert_eq!(app.focus, Focus::CategoryList);
+        app.handle_key(KeyCode::Tab, NONE); // skips Mid + Tracks -> TabBar
+        assert_eq!(app.focus, Focus::TabBar);
+
+        fs::remove_dir_all(tmp_root("focus-skip")).ok();
+    }
+
+    #[test]
+    fn album_artist_enter_drills_down() {
+        let mut app = make_app("aa-drill");
+        app.scan_state = None;
+        app.apply_scan_results_at(tmp_root("aa-drill"), two_track_payload());
+
+        app.handle_key(KeyCode::Char('2'), NONE);
+        app.handle_key(KeyCode::Tab, NONE); // -> CategoryTabs
+        app.handle_key(KeyCode::Tab, NONE); // -> CategoryList
+        app.handle_key(KeyCode::Enter, NONE);
+        assert_eq!(app.focus, Focus::CategoryMid, "Enter opens the album list");
+        app.handle_key(KeyCode::Enter, NONE);
+        assert_eq!(app.focus, Focus::CategoryTracks, "Enter opens the tracks");
+        app.handle_key(KeyCode::Enter, NONE);
+        assert_eq!(app.active_tab, AppTab::NowPlaying, "Enter plays");
+        assert!(app.audio.current_track.is_some());
+
+        fs::remove_dir_all(tmp_root("aa-drill")).ok();
+    }
+
+    #[test]
+    fn song_enter_plays_in_place() {
+        let mut app = make_app("song-play");
+        app.scan_state = None;
+        app.apply_scan_results_at(tmp_root("song-play"), two_track_payload());
+
+        app.handle_key(KeyCode::Char('2'), NONE);
+        app.handle_key(KeyCode::Right, NONE); // -> Song
+        app.handle_key(KeyCode::Tab, NONE); // -> CategoryTabs
+        app.handle_key(KeyCode::Tab, NONE); // -> CategoryList (songs)
+        app.handle_key(KeyCode::Enter, NONE);
+        assert_eq!(app.active_tab, AppTab::Categories, "stays in the song list");
+        assert!(app.audio.current_track.is_some(), "the highlighted song plays");
+
+        fs::remove_dir_all(tmp_root("song-play")).ok();
+    }
+
+    #[test]
+    fn album_artist_mid_navigation_repopulates_tracks() {
+        let mut app = make_app("aa-mid");
+        app.scan_state = None;
+        app.apply_scan_results_at(tmp_root("aa-mid"), two_track_payload());
+
+        app.handle_key(KeyCode::Char('2'), NONE);
+        assert_eq!(app.category_type, CategoryType::AlbumArtist);
+        // Two tracks of the same album artist: the mid list has one album.
+        assert_eq!(app.category_mid_items.len(), 1);
+        assert_eq!(app.category_mid_items[0].0, "Night Drive");
+        assert_eq!(app.active_playlist_tracks.len(), 2);
+
+        // Arrow keys in the middle list walk the albums.
+        app.focus = Focus::CategoryMid;
+        app.handle_key(KeyCode::Down, NONE);
+        assert_eq!(app.selected_category_mid_idx, 0, "single album stays put");
+
+        fs::remove_dir_all(tmp_root("aa-mid")).ok();
+    }
+
+    #[test]
+    fn song_listing_is_sorted_and_maps_selection_to_track() {
+        let mut app = make_app("song-sort");
+        app.scan_state = None;
+        let payload = ScanPayload {
+            tracks: vec![
+                make_track("a", "Zebra Road"),
+                make_track("b", "apple tree"),
+                make_track("c", "Midnight Sun"),
+            ],
+            m3us: Vec::new(),
+        };
+        app.apply_scan_results_at(tmp_root("song-sort"), payload);
+
+        app.handle_key(KeyCode::Char('2'), NONE);
+        app.handle_key(KeyCode::Right, NONE); // -> Song
+        // Case-insensitive alphabetical order.
+        assert_eq!(app.active_category_name, "apple tree", "first row sorts first");
+        assert_eq!(app.active_playlist_tracks.len(), 1);
+        assert_eq!(app.library.tracks[app.active_playlist_tracks[0]].id, "b");
+
+        // Focus the song list and move down: the next song is selected
+        // exactly (by index, not by title match).
+        app.handle_key(KeyCode::Tab, NONE);
+        app.handle_key(KeyCode::Tab, NONE);
+        assert_eq!(app.focus, Focus::CategoryList);
+        app.handle_key(KeyCode::Down, NONE);
+        assert_eq!(app.active_category_name, "Midnight Sun");
+        assert_eq!(app.library.tracks[app.active_playlist_tracks[0]].id, "c");
+
+        fs::remove_dir_all(tmp_root("song-sort")).ok();
+    }
+
+    #[test]
+    fn playlist_category_shows_only_user_playlists() {
+        let mut app = make_app("user-pl");
+        app.scan_state = None;
+        app.apply_scan_results_at(tmp_root("user-pl"), two_track_payload());
+
+        // No user playlists yet: the category is empty.
+        app.category_type = CategoryType::Playlist;
+        app.refresh_active_category();
+        assert!(app.library.get_category_items(CategoryType::Playlist).is_empty());
+
+        // Creating one makes it show up — exactly one, no folder entries.
+        app.user_data.create_playlist("Road Trip", "").unwrap();
+        app.after_library_rebuild();
+        app.refresh_active_category();
+        let items = app.library.get_category_items(CategoryType::Playlist);
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].0, "♪ Road Trip");
+
+        fs::remove_dir_all(tmp_root("user-pl")).ok();
     }
 
     // ------------------------------------------------------------------
@@ -1980,20 +2358,14 @@ mod tests {
         app.handle_key(KeyCode::Char('3'), NONE);
         assert_eq!(app.active_tab, AppTab::Queue);
 
-        // Tab once -> sub-tab row owns the digits: 2 selects the Song type.
+        // Even with the sub-tab strip focused, digits are main tabs only —
+        // the strip is display-only (←/→ drives the category type).
         app.handle_key(KeyCode::Char('2'), NONE);
         app.handle_key(KeyCode::Tab, NONE);
         assert_eq!(app.focus, Focus::CategoryTabs);
-        app.handle_key(KeyCode::Char('2'), NONE);
-        assert_eq!(app.category_type, CategoryType::Song);
-        assert_eq!(app.active_tab, AppTab::Categories);
-
-        // Tab again -> the list owns Up/Down; digits do nothing there.
-        app.handle_key(KeyCode::Tab, NONE);
-        assert_eq!(app.focus, Focus::CategoryList);
-        app.handle_key(KeyCode::Char('3'), NONE);
-        assert_eq!(app.active_tab, AppTab::Categories);
-        assert_eq!(app.category_type, CategoryType::Song);
+        app.handle_key(KeyCode::Char('1'), NONE);
+        assert_eq!(app.active_tab, AppTab::NowPlaying);
+        assert_eq!(app.category_type, CategoryType::AlbumArtist);
 
         fs::remove_dir_all(tmp_root("digits")).ok();
     }
@@ -2001,26 +2373,43 @@ mod tests {
     #[test]
     fn categories_enter_and_esc_walk_focus() {
         let mut app = make_app("catesc");
-        // Stop the startup scan so Esc reaches tab navigation (otherwise it
-        // cancels the scan first).
         app.scan_state = None;
+        app.apply_scan_results_at(tmp_root("catesc"), two_track_payload());
         app.handle_key(KeyCode::Char('2'), NONE); // -> Categories, tab bar
         // Esc from the tab bar leaves Categories entirely.
         app.handle_key(KeyCode::Esc, NONE);
         assert_eq!(app.active_tab, AppTab::NowPlaying);
 
-        // Enter on the list jumps focus into the tracklist; Enter there
-        // plays and returns to Now Playing.
+        // Enter walks down the drill: list -> mid (albums) -> tracks.
         app.handle_key(KeyCode::Char('2'), NONE);
         app.handle_key(KeyCode::Tab, NONE);
         app.handle_key(KeyCode::Tab, NONE);
         assert_eq!(app.focus, Focus::CategoryList);
         app.handle_key(KeyCode::Enter, NONE);
+        assert_eq!(app.focus, Focus::CategoryMid);
+        app.handle_key(KeyCode::Enter, NONE);
+        assert_eq!(app.focus, Focus::CategoryTracks);
+        // Enter there plays and returns to Now Playing.
+        app.handle_key(KeyCode::Enter, NONE);
+        assert_eq!(app.active_tab, AppTab::NowPlaying);
+
+        // Esc walks back up: from the tracklist over the mid list, list,
+        // sub-tabs, then out of the tab.
+        app.handle_key(KeyCode::Char('2'), NONE);
+        app.handle_key(KeyCode::Tab, NONE);
+        app.handle_key(KeyCode::Tab, NONE);
+        app.handle_key(KeyCode::Enter, NONE);
+        app.handle_key(KeyCode::Enter, NONE);
         assert_eq!(app.focus, Focus::CategoryTracks);
         app.handle_key(KeyCode::Esc, NONE);
+        assert_eq!(app.focus, Focus::CategoryMid);
+        app.handle_key(KeyCode::Esc, NONE);
         assert_eq!(app.focus, Focus::CategoryList);
-        app.handle_key(KeyCode::Enter, NONE);
-        app.handle_key(KeyCode::Enter, NONE);
+        app.handle_key(KeyCode::Esc, NONE);
+        assert_eq!(app.focus, Focus::CategoryTabs);
+        app.handle_key(KeyCode::Esc, NONE);
+        assert_eq!(app.focus, Focus::TabBar);
+        app.handle_key(KeyCode::Esc, NONE);
         assert_eq!(app.active_tab, AppTab::NowPlaying);
 
         fs::remove_dir_all(tmp_root("catesc")).ok();
@@ -2069,11 +2458,12 @@ mod tests {
         let mut app = make_app("setvar");
         app.handle_key(KeyCode::Char('6'), NONE);
         assert_eq!(app.focus, Focus::SettingsList);
-        // Row 0 = StartupCache toggle.
+        // Row 0 = Music folder (Enter opens the dialog), row 1 = StartupCache.
+        app.settings_selected = 1;
         app.handle_key(KeyCode::Enter, NONE);
         assert!(!app.settings.load_library_cache_on_launch);
         // Left/Right on DefaultVolume adjust by 5.
-        app.settings_selected = 1;
+        app.settings_selected = 2;
         app.handle_key(KeyCode::Left, NONE);
         assert_eq!(app.settings.default_volume, 80);
         app.handle_key(KeyCode::Right, NONE);
@@ -2081,7 +2471,7 @@ mod tests {
         // Volume changes applied live too.
         assert_eq!(app.audio.volume, 85);
         // ArtSize cycles with Right.
-        app.settings_selected = 4;
+        app.settings_selected = 5;
         app.handle_key(KeyCode::Right, NONE);
         assert_eq!(app.settings.art_size, crate::settings::ArtSize::Small);
         // Reload from disk and check persistence.
@@ -2096,9 +2486,9 @@ mod tests {
     #[test]
     fn remember_state_persists_repeat_shuffle() {
         let mut app = make_app("remember");
-        // Enable remembering (row 2) while repeat=All/shuffle=Off.
+        // Enable remembering (row 3) while repeat=All/shuffle=Off.
         app.handle_key(KeyCode::Char('6'), NONE);
-        app.settings_selected = 2;
+        app.settings_selected = 3;
         app.handle_key(KeyCode::Enter, NONE);
         assert!(app.settings.remember_repeat_shuffle);
         // Toggle shuffle via the global hotkey: snapshot saved.
@@ -2285,7 +2675,7 @@ mod tests {
         // Valid JSON but zero tracks (e.g. an empty folder was cached).
         std::fs::write(
             cfg.join("library_cache.json"),
-            r#"{"version":1,"folder":"/x","scanned_at":0,"tracks":[],"m3us":[]}"#,
+            r#"{"version":2,"folder":"/x","scanned_at":0,"tracks":[],"m3us":[]}"#,
         )
         .unwrap();
         let app2 = App::new_in(cfg, Some(music));
@@ -2389,6 +2779,107 @@ mod tests {
         assert!(app.scan_state.is_some());
 
         fs::remove_dir_all(tmp_root("dialog")).ok();
+    }
+
+    // ------------------------------------------------------------------
+    // Caps-Lock tolerance: unbound uppercase letters fall back to the
+    // lowercase action, so `O` with Caps Lock on still opens the dialog.
+    // crossterm reports SHIFT for every uppercase char byte, so these
+    // tests pass SHIFT exactly the way the real event loop delivers it.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn caps_lock_o_still_opens_folder_dialog() {
+        let mut app = make_app("caps-o");
+        assert!(!app.is_folder_dialog_open);
+        // Caps Lock produces 'O' with SHIFT reported (crossterm always sets
+        // SHIFT for uppercase chars).
+        app.handle_key(KeyCode::Char('O'), KeyModifiers::SHIFT);
+        assert!(app.is_folder_dialog_open);
+    }
+
+    #[test]
+    fn caps_lock_a_still_opens_song_menu() {
+        let mut app = make_app("caps-a");
+        // The song menu needs a selected track, same as pressing `a`.
+        app.library.tracks = vec![make_track("a", "First Light")];
+        app.library.rebuild_indexes();
+        app.after_library_rebuild();
+        app.selected_tracklist_idx = 0;
+        assert!(app.menu.is_none());
+        // Caps Lock yields `A` (reported with SHIFT); no action is bound to
+        // `A`, so the lowercase fallback routes it to Song Menu.
+        app.handle_key(KeyCode::Char('A'), KeyModifiers::SHIFT);
+        assert!(app.menu.is_some());
+    }
+
+    #[test]
+    fn caps_and_shift_s_both_rescan() {
+        // `S` arrives the same way from Shift+S and Caps Lock+S, and stays
+        // bound to Rescan — the fallback must not shadow real bindings.
+        let mut app = make_app("caps-s");
+        app.scan_state = None;
+        app.handle_key(KeyCode::Char('S'), KeyModifiers::SHIFT);
+        assert!(app.scan_state.is_some());
+    }
+
+    #[test]
+    fn unbound_uppercase_without_shift_falls_back_too() {
+        // Some terminals may deliver an uppercase char without SHIFT;
+        // the fallback must not depend on the modifier bit.
+        let mut app = make_app("caps-o-nomod");
+        app.handle_key(KeyCode::Char('O'), KeyModifiers::empty());
+        assert!(app.is_folder_dialog_open);
+    }
+
+    // ------------------------------------------------------------------
+    // Folder dialog typing: the first typed/pasted path replaces the
+    // pre-filled current folder instead of appending to it.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn dialog_typing_replaces_prefilled_path() {
+        let mut app = make_app("dialog-replace");
+        let music = tmp_root("dialog-replace").join("music");
+        // Give the library a folder so the dialog pre-fills with it.
+        app.apply_scan_results_at(music.clone(), two_track_payload());
+
+        app.open_folder_dialog();
+        assert_eq!(app.folder_dialog_input, music.display().to_string());
+
+        // First keystroke replaces the whole prefill…
+        app.handle_key(KeyCode::Char('/'), NONE);
+        app.handle_key(KeyCode::Char('h'), NONE);
+        assert_eq!(app.folder_dialog_input, "/h");
+
+        // …and once the input differs, typing appends again.
+        app.handle_key(KeyCode::Char('i'), NONE);
+        assert_eq!(app.folder_dialog_input, "/hi");
+
+        // Pasting over the untouched prefill replaces it too.
+        app.close_folder_dialog();
+        app.open_folder_dialog();
+        app.paste_text("/somewhere/else");
+        assert_eq!(app.folder_dialog_input, "/somewhere/else");
+
+        fs::remove_dir_all(tmp_root("dialog-replace")).ok();
+    }
+
+    #[test]
+    fn dialog_typing_after_clear_appends() {
+        let mut app = make_app("dialog-clear");
+        let music = tmp_root("dialog-clear").join("music");
+        app.apply_scan_results_at(music.clone(), two_track_payload());
+
+        app.open_folder_dialog();
+        // Ctrl+U clears the prefill; the next paste appends to the empty
+        // input (a deliberate way to build a path piece by piece).
+        app.handle_key(KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert!(app.folder_dialog_input.is_empty());
+        app.paste_text("~/Music");
+        assert_eq!(app.folder_dialog_input, "~/Music");
+
+        fs::remove_dir_all(tmp_root("dialog-clear")).ok();
     }
 
     // ------------------------------------------------------------------

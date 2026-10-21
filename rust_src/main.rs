@@ -207,15 +207,17 @@ OPTIONS:
     -v, --version          Show version
 
 KEYBOARD SHORTCUTS:
-    [1] - [5]              Switch tabs (Now Playing, Categories, Queue, Metadata, Output);
-                           inside Categories, 1-4 switch the category type, Esc returns to Now Playing
-    [Tab]                  Switch focus between tracklist and lyrics panes
+    [1] - [6]              Switch tabs (Now Playing, Categories, Queue, Metadata, Output, Settings);
+                           inside Categories, [←]/[→] switch the sub-tab (Album Artist / Song /
+                           Artists / Album / Playlist), digits always switch main tabs
+    [Tab]                  Switch focus between panes
     [Space]                Toggle Play / Pause
     [n] / [p]              Next / Previous Track
-    [←] / [→]              Seek backward / forward 5 seconds
-    [+] / [-]              Volume Up / Down (5%)
+    [←] / [→]              Seek backward / forward (step set in Settings, default 5s)
+    [+] / [-]              Volume Up / Down (step set in Settings, default 5%)
     [r]                    Cycle Repeat mode (Off / All / One)
     [o] / [f]              Open folder dialog to paste or change music folder path
+                           (also: Settings tab → "Music folder" row → Enter)
     [e]                    Edit metadata tags of highlighted track
     [Ctrl+S]               Save edited metadata tags to audio file
     [a]                    Song menu (add to playlist, credits, favourite)

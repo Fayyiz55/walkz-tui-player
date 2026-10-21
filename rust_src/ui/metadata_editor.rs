@@ -44,7 +44,7 @@ fn render_track_selector(f: &mut Frame, app: &App, area: Rect) {
         let prefix = if is_selected { "▶ " } else { "  " };
 
         let line = Line::from(vec![
-            Span::styled(prefix, Style::default().fg(Color::Cyan)),
+            Span::styled(prefix, Style::default().fg(app.accent())),
             Span::styled(
                 format!("{:<20} ", truncate(track.title.as_str(), 20)),
                 if is_selected { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::White) },
@@ -72,7 +72,7 @@ fn render_editor_form(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(Style::default().fg(app.accent()))
         .title(" 🏷️  Metadata Tag Editor ");
 
     let inner = block.inner(area);
@@ -97,7 +97,7 @@ fn render_editor_form(f: &mut Frame, app: &App, area: Rect) {
 
     let header_line = Line::from(vec![
         Span::styled("Target File: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(path_str, Style::default().fg(Color::Cyan)),
+        Span::styled(path_str, Style::default().fg(app.accent())),
     ]);
     f.render_widget(Paragraph::new(header_line), layout[0]);
 
@@ -129,7 +129,7 @@ fn render_editor_form(f: &mut Frame, app: &App, area: Rect) {
         field_lines.push(Line::from(vec![
             Span::styled(format!(" {:<14}: ", field.label), label_style),
             Span::styled(format!(" {} ", val_display), val_style),
-            Span::styled(cursor, Style::default().fg(Color::Cyan)),
+            Span::styled(cursor, Style::default().fg(app.accent())),
         ]));
         field_lines.push(Line::raw("")); // Spacing row
     }
@@ -149,9 +149,9 @@ fn render_editor_form(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("Press ", Style::default().fg(Color::DarkGray)),
             Span::styled("[Ctrl+S]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             Span::styled(" to save tags to audio file.  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("[Tab/↓]", Style::default().fg(Color::Cyan)),
+            Span::styled("[Tab/↓]", Style::default().fg(app.accent())),
             Span::styled(" Next field  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("[Shift+Tab/↑]", Style::default().fg(Color::Cyan)),
+            Span::styled("[Shift+Tab/↑]", Style::default().fg(app.accent())),
             Span::styled(" Prev field", Style::default().fg(Color::DarkGray)),
         ]));
     }
